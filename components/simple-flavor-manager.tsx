@@ -1,0 +1,1157 @@
+"use client";
+
+import { useMemo, useState, useTransition } from "react";
+import {
+  closestCenter,
+  DndContext,
+  PointerSensor,
+  type DragEndEvent,
+  useSensor,
+  useSensors
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  verticalListSortingStrategy,
+  useSortable
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
+import { motion } from "framer-motion";
+import {
+  ChevronDown,
+  Copy,
+  GripVertical,
+  Pencil,
+  Plus,
+  Save,
+  Trash2
+} from "lucide-react";
+
+import { AnimatedButton } from "@/components/ui/animated-button";
+import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import type { MatrixFlavorRecord, MatrixStepRecord } from "@/lib/matrix/types";
+import { cn } from "@/lib/utils";
+
+interface SimpleFlavorManagerProps {
+  initialFlavors: MatrixFlavorRecord[];
+}
+
+type FlavorFormState = {
+  name: string;
+  slug: string;
+  description: string;
+  systemPrompt: string;
+};
+
+type StepFormState = {
+  title: string;
+  description: string;
+  systemPrompt: string;
+  userPrompt: string;
+  modelId: string;
+  temperature: number;
+  inputType: "image+text" | "text";
+  outputType: "string" | "array";
+  stepKind: string;
+  reuseCachedAdminValues: boolean;
+};
+
+type SaveResult = { error: { message: string } | null; data?: unknown };
+
+function toSlug(value: string) {
+  return value
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function emptyFlavorForm(): FlavorFormState {
+  return {
+    name: "",
+    slug: "",
+    description: "",
+    systemPrompt: ""
+  };
+}
+
+function emptyStepForm(): StepFormState {
+  return {
+    title: "",
+    description: "",
+    systemPrompt: "",
+    userPrompt: "",
+    modelId: "",
+    temperature: 0.7,
+    inputType: "text",
+    outputType: "string",
+    stepKind: "",
+    reuseCachedAdminValues: false
+  };
+}
+
+function buildFlavorPayloadCandidates(
+  form: FlavorFormState,
+  sampleRaw?: Record<string, unknown>
+) {
+  const normalized = {
+    name: form.name,
+    slug: form.slug || toSlug(form.name),
+    description: form.description || null,
+    systemPrompt: form.systemPrompt || null
+  };
+  const raw = sampleRaw ?? {};
+  const preferredNameKey =
+    "name" in raw ? "name" : "title" in raw ? "title" : "flavor_name" in raw ? "flavor_name" : null;
+  const preferredDescriptionKey =
+    "description" in raw
+      ? "description"
+      : "summary" in raw
+        ? "summary"
+        : "subtitle" in raw
+          ? "subtitle"
+          : null;
+  const preferredPromptKey =
+    "llm_system_prompt" in raw
+      ? "llm_system_prompt"
+      : "system_prompt" in raw
+        ? "system_prompt"
+        : "prompt" in raw
+          ? "prompt"
+          : null;
+
+  const candidates: Array<Record<string, string | null>> = [];
+
+  if (preferredNameKey) {
+    candidates.push({
+      [preferredNameKey]: normalized.name,
+      slug: normalized.slug,
+      [preferredDescriptionKey ?? "description"]: normalized.description,
+      [preferredPromptKey ?? "llm_system_prompt"]: normalized.systemPrompt
+    });
+  }
+
+  candidates.push(
+    {
+      title: normalized.name,
+      slug: normalized.slug,
+      description: normalized.description,
+      llm_system_prompt: normalized.systemPrompt
+    },
+    {
+      flavor_name: normalized.name,
+      slug: normalized.slug,
+      summary: normalized.description,
+      system_prompt: normalized.systemPrompt
+    },
+    {
+      name: normalized.name,
+      slug: normalized.slug,
+      description: normalized.description,
+      llm_system_prompt: normalized.systemPrompt
+    }
+  );
+
+  return candidates.filter(
+    (candidate, index, array) =>
+      array.findIndex((entry) => JSON.stringify(entry) === JSON.stringify(candidate)) === index
+  );
+}
+
+function buildStepPayloadCandidates(
+  form: StepFormState,
+  flavorId: string,
+  executionOrder: number,
+  sampleRaw?: Record<string, unknown>
+) {
+  const raw = sampleRaw ?? {};
+  const base = {
+    title: form.title,
+    description: form.description || null,
+    systemPrompt: form.systemPrompt || null,
+    userPrompt: form.userPrompt,
+    modelId: form.modelId || null,
+    temperature: form.temperature,
+    inputType: form.inputType,
+    outputType: form.outputType,
+    stepKind: form.stepKind || null,
+    reuseCachedAdminValues: form.reuseCachedAdminValues
+  };
+  const relationKey =
+    "humor_flavor_id" in raw ? "humor_flavor_id" : "flavor_id" in raw ? "flavor_id" : "flavor_id";
+  const orderKey =
+    "order_by" in raw ? "order_by" : "execution_order" in raw ? "execution_order" : "order_by";
+
+  const candidates: Array<Record<string, string | number | boolean | null>> = [
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      step_description: base.description,
+      system_prompt: base.systemPrompt,
+      user_prompt: base.userPrompt,
+      model_id: base.modelId,
+      temperature: base.temperature,
+      input_type: base.inputType,
+      output_type: base.outputType,
+      step_type: base.stepKind,
+      reuse_cached_admin_values: base.reuseCachedAdminValues,
+      title: base.title
+    },
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      description: base.description,
+      llm_system_prompt: base.systemPrompt,
+      llm_user_prompt: base.userPrompt,
+      llm_model_id: base.modelId,
+      temperature: base.temperature,
+      input_type: base.inputType,
+      output_type: base.outputType,
+      kind: base.stepKind,
+      use_cached_values: base.reuseCachedAdminValues,
+      step_name: base.title
+    },
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      step_description: base.description,
+      system_prompt: base.systemPrompt,
+      prompt: base.userPrompt,
+      model_id: base.modelId,
+      temperature: base.temperature,
+      input_type: base.inputType,
+      output_type: base.outputType,
+      step_type: base.stepKind,
+      reuse_cached_admin_values: base.reuseCachedAdminValues,
+      name: base.title
+    },
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      step_description: base.description,
+      system_prompt: base.systemPrompt,
+      user_prompt: base.userPrompt,
+      title: base.title
+    },
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      description: base.description,
+      llm_system_prompt: base.systemPrompt,
+      llm_user_prompt: base.userPrompt,
+      step_name: base.title
+    },
+    {
+      [relationKey]: flavorId,
+      [orderKey]: executionOrder,
+      description: base.description,
+      prompt: base.userPrompt,
+      name: base.title
+    }
+  ];
+
+  return candidates.filter(
+    (candidate, index, array) =>
+      array.findIndex((entry) => JSON.stringify(entry) === JSON.stringify(candidate)) === index
+  );
+}
+
+async function saveWithFallbacks(
+  operation: (payload: Record<string, string | number | boolean | null>) => Promise<SaveResult>,
+  payloads: Array<Record<string, string | number | boolean | null>>
+) {
+  let lastError: string | null = null;
+
+  for (const payload of payloads) {
+    const result = await operation(payload);
+    if (!result.error) {
+      return result;
+    }
+    lastError = result.error.message;
+  }
+
+  return {
+    error: { message: lastError ?? "Unknown save error." },
+    data: null
+  };
+}
+
+function normalizeSavedStep(data: Record<string, unknown>, fallback: StepFormState, flavorId: string, orderBy: number): MatrixStepRecord {
+  return {
+    id: String(data.id),
+    flavorId: String(data.humor_flavor_id ?? data.flavor_id ?? flavorId),
+    title: String(data.title ?? data.step_name ?? data.name ?? fallback.title),
+    description: (data.step_description ?? data.description ?? fallback.description) as string | null,
+    systemPrompt: (data.system_prompt ?? data.llm_system_prompt ?? fallback.systemPrompt) as string | null,
+    userPrompt: String(data.user_prompt ?? data.llm_user_prompt ?? data.prompt ?? fallback.userPrompt),
+    prompt: String(data.user_prompt ?? data.llm_user_prompt ?? data.prompt ?? fallback.userPrompt),
+    orderBy: Number(data.order_by ?? data.execution_order ?? data.position ?? orderBy),
+    inputType: (data.input_type === "image+text" ? "image+text" : "text"),
+    outputType: (data.output_type === "array" ? "array" : "string"),
+    modelId: ((data.model_id ?? data.llm_model_id ?? fallback.modelId) || null) as string | null,
+    temperature: typeof data.temperature === "number" ? data.temperature : fallback.temperature,
+    stepKind: ((data.step_type ?? data.kind ?? data.step_kind ?? fallback.stepKind) || null) as string | null,
+    reuseCachedAdminValues: Boolean(
+      data.reuse_cached_admin_values ?? data.use_cached_values ?? fallback.reuseCachedAdminValues
+    ),
+    imageId: (data.image_id ?? data.images_id ?? null) as string | null,
+    raw: data
+  };
+}
+
+function toStepForm(step: MatrixStepRecord): StepFormState {
+  return {
+    title: step.title,
+    description: step.description ?? "",
+    systemPrompt: step.systemPrompt ?? "",
+    userPrompt: step.userPrompt,
+    modelId: step.modelId ?? "",
+    temperature: step.temperature ?? 0.7,
+    inputType: step.inputType,
+    outputType: step.outputType,
+    stepKind: step.stepKind ?? "",
+    reuseCachedAdminValues: step.reuseCachedAdminValues
+  };
+}
+
+function SortableStepCard({
+  step,
+  expanded,
+  onToggle,
+  onEdit,
+  onDelete
+}: {
+  step: MatrixStepRecord;
+  expanded: boolean;
+  onToggle: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: step.id
+  });
+
+  return (
+    <motion.div
+      layout
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={cn(
+        "rounded-[1.15rem] border border-slate-800 bg-slate-950/50",
+        isDragging && "ring-2 ring-sky-500/50"
+      )}
+    >
+      <div className="flex items-start gap-3 p-4">
+        <button
+          type="button"
+          className="mt-1 rounded-full border border-slate-800 p-2 text-slate-500"
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical className="h-4 w-4" />
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <button type="button" onClick={onToggle} className="min-w-0 text-left">
+              <p className="text-xs uppercase tracking-[0.24em] text-cyan-400">Step {step.orderBy}</p>
+              <div className="mt-1 flex items-center gap-2">
+                <h3 className="truncate text-base font-semibold text-slate-100">{step.title}</h3>
+                <ChevronDown className={cn("h-4 w-4 text-slate-500 transition", expanded && "rotate-180")} />
+              </div>
+              <p className="mt-2 line-clamp-2 text-sm text-slate-400">
+                {step.description || step.userPrompt || "No step details yet."}
+              </p>
+            </button>
+            <div className="flex flex-wrap gap-2">
+              <AnimatedButton glow={false} className="px-3 py-2 text-xs" onClick={onEdit}>
+                <Pencil className="mr-1 h-3.5 w-3.5" />
+                Edit
+              </AnimatedButton>
+              <AnimatedButton
+                glow={false}
+                className="border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100"
+                onClick={onDelete}
+              >
+                <Trash2 className="mr-1 h-3.5 w-3.5" />
+                Delete
+              </AnimatedButton>
+            </div>
+          </div>
+
+          {expanded ? (
+            <div className="mt-4 grid gap-3 border-t border-slate-800 pt-4 text-sm text-slate-300 md:grid-cols-2">
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Description</p>
+                <p className="mt-1 whitespace-pre-wrap">{step.description || "-"}</p>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Model / Temp</p>
+                <p className="mt-1">{step.modelId || "Default model"} / {step.temperature ?? "-"}</p>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Input / Output</p>
+                <p className="mt-1">{step.inputType} → {step.outputType}</p>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Step Type</p>
+                <p className="mt-1">{step.stepKind || "-"}</p>
+              </div>
+              <div className="md:col-span-2">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">System Prompt</p>
+                <p className="mt-1 whitespace-pre-wrap font-mono text-slate-400">{step.systemPrompt || "-"}</p>
+              </div>
+              <div className="md:col-span-2">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-500">User Prompt</p>
+                <p className="mt-1 whitespace-pre-wrap font-mono text-slate-400">{step.userPrompt}</p>
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps) {
+  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const [flavors, setFlavors] = useState(initialFlavors);
+  const [selectedFlavorId, setSelectedFlavorId] = useState(initialFlavors[0]?.id ?? null);
+  const [editingFlavorId, setEditingFlavorId] = useState<string | null>(null);
+  const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  const [expandedStepIds, setExpandedStepIds] = useState<string[]>([]);
+  const [flavorForm, setFlavorForm] = useState<FlavorFormState>(emptyFlavorForm);
+  const [stepForm, setStepForm] = useState<StepFormState>(emptyStepForm);
+  const [message, setMessage] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+
+  const selectedFlavor = flavors.find((flavor) => flavor.id === selectedFlavorId) ?? null;
+  const flavorSampleRaw = selectedFlavor?.raw ?? flavors[0]?.raw;
+  const stepSampleRaw = selectedFlavor?.steps[0]?.raw;
+
+  function startCreateFlavor() {
+    setEditingFlavorId(null);
+    setFlavorForm(emptyFlavorForm());
+    setMessage(null);
+  }
+
+  function startEditFlavor(flavor: MatrixFlavorRecord) {
+    setEditingFlavorId(flavor.id);
+    setSelectedFlavorId(flavor.id);
+    setFlavorForm({
+      name: flavor.name,
+      slug: flavor.slug,
+      description: flavor.description ?? "",
+      systemPrompt: flavor.systemPrompt ?? ""
+    });
+    setMessage(null);
+  }
+
+  function startCreateStep() {
+    setEditingStepId(null);
+    setStepForm(emptyStepForm());
+    setMessage(null);
+  }
+
+  function startEditStep(step: MatrixStepRecord) {
+    setEditingStepId(step.id);
+    setStepForm(toStepForm(step));
+    setExpandedStepIds((current) => Array.from(new Set([...current, step.id])));
+    setMessage(null);
+  }
+
+  function saveFlavor() {
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+
+        const payloads = buildFlavorPayloadCandidates(
+          {
+            ...flavorForm,
+            slug: flavorForm.slug || toSlug(flavorForm.name)
+          },
+          flavorSampleRaw
+        );
+
+        if (editingFlavorId) {
+          const { error } = await saveWithFallbacks(
+            (payload) => supabase.from("humor_flavors").update(payload).eq("id", editingFlavorId),
+            payloads
+          );
+
+          if (error) {
+            setMessage(error.message);
+            return;
+          }
+
+          setFlavors((current) =>
+            current.map((flavor) =>
+              flavor.id === editingFlavorId
+                ? {
+                    ...flavor,
+                    name: flavorForm.name,
+                    slug: flavorForm.slug || toSlug(flavorForm.name),
+                    description: flavorForm.description || null,
+                    systemPrompt: flavorForm.systemPrompt || null
+                  }
+                : flavor
+            )
+          );
+          setMessage("Flavor updated.");
+          return;
+        }
+
+        const { data, error } = await saveWithFallbacks(
+          (payload) => supabase.from("humor_flavors").insert(payload).select("*").single(),
+          payloads
+        );
+
+        if (error) {
+          setMessage(error.message);
+          return;
+        }
+
+        const createdFlavor: MatrixFlavorRecord = {
+          id: String((data as Record<string, unknown>).id),
+          name: flavorForm.name,
+          slug: flavorForm.slug || toSlug(flavorForm.name),
+          description: flavorForm.description || null,
+          systemPrompt: flavorForm.systemPrompt || null,
+          steps: [],
+          raw: data as Record<string, unknown>
+        };
+
+        setFlavors((current) => [createdFlavor, ...current]);
+        setSelectedFlavorId(createdFlavor.id);
+        setEditingFlavorId(createdFlavor.id);
+        setMessage("Flavor created.");
+      })();
+    });
+  }
+
+  function deleteFlavor(flavorId: string) {
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+        const { error } = await supabase.from("humor_flavors").delete().eq("id", flavorId);
+
+        if (error) {
+          setMessage(error.message);
+          return;
+        }
+
+        const nextFlavors = flavors.filter((flavor) => flavor.id !== flavorId);
+        setFlavors(nextFlavors);
+        setSelectedFlavorId(nextFlavors[0]?.id ?? null);
+        if (editingFlavorId === flavorId) {
+          setEditingFlavorId(null);
+          setFlavorForm(emptyFlavorForm());
+        }
+        setMessage("Flavor deleted.");
+      })();
+    });
+  }
+
+  function saveStep() {
+    if (!selectedFlavor) {
+      return;
+    }
+
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+        const orderBy =
+          editingStepId == null
+            ? selectedFlavor.steps.length + 1
+            : selectedFlavor.steps.find((step) => step.id === editingStepId)?.orderBy ?? 1;
+        const payloads = buildStepPayloadCandidates(stepForm, selectedFlavor.id, orderBy, stepSampleRaw);
+
+        if (editingStepId) {
+          const { data, error } = await saveWithFallbacks(
+            (payload) =>
+              supabase.from("humor_flavor_steps").update(payload).eq("id", editingStepId).select("*").single(),
+            payloads
+          );
+
+          if (error) {
+            setMessage(error.message);
+            return;
+          }
+
+          const updatedStep = normalizeSavedStep(data as Record<string, unknown>, stepForm, selectedFlavor.id, orderBy);
+          setFlavors((current) =>
+            current.map((flavor) =>
+              flavor.id === selectedFlavor.id
+                ? {
+                    ...flavor,
+                    steps: flavor.steps.map((step) => (step.id === editingStepId ? updatedStep : step))
+                  }
+                : flavor
+            )
+          );
+          setMessage("Step updated.");
+        } else {
+          const { data, error } = await saveWithFallbacks(
+            (payload) => supabase.from("humor_flavor_steps").insert(payload).select("*").single(),
+            payloads
+          );
+
+          if (error) {
+            setMessage(error.message);
+            return;
+          }
+
+          const createdStep = normalizeSavedStep(data as Record<string, unknown>, stepForm, selectedFlavor.id, orderBy);
+          setFlavors((current) =>
+            current.map((flavor) =>
+              flavor.id === selectedFlavor.id
+                ? {
+                    ...flavor,
+                    steps: [...flavor.steps, createdStep].sort((left, right) => left.orderBy - right.orderBy)
+                  }
+                : flavor
+            )
+          );
+          setExpandedStepIds((current) => Array.from(new Set([...current, createdStep.id])));
+          setMessage("Step created.");
+        }
+
+        setEditingStepId(null);
+        setStepForm(emptyStepForm());
+      })();
+    });
+  }
+
+  function deleteStep(stepId: string) {
+    if (!selectedFlavor) {
+      return;
+    }
+
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+        const { error } = await supabase.from("humor_flavor_steps").delete().eq("id", stepId);
+
+        if (error) {
+          setMessage(error.message);
+          return;
+        }
+
+        const nextSteps = selectedFlavor.steps
+          .filter((step) => step.id !== stepId)
+          .map((step, index) => ({ ...step, orderBy: index + 1 }));
+        setFlavors((current) =>
+          current.map((flavor) =>
+            flavor.id === selectedFlavor.id ? { ...flavor, steps: nextSteps } : flavor
+          )
+        );
+        setExpandedStepIds((current) => current.filter((id) => id !== stepId));
+        await persistStepOrder(selectedFlavor.id, nextSteps);
+        setMessage("Step deleted.");
+      })();
+    });
+  }
+
+  async function persistStepOrder(flavorId: string, steps: MatrixStepRecord[]) {
+    for (const [index, step] of steps.entries()) {
+      const payloads = [
+        {
+          humor_flavor_id: flavorId,
+          order_by: index + 1
+        },
+        {
+          flavor_id: flavorId,
+          execution_order: index + 1
+        },
+        {
+          flavor_id: flavorId,
+          order_by: index + 1
+        }
+      ];
+
+      const { error } = await saveWithFallbacks(
+        (payload) => supabase.from("humor_flavor_steps").update(payload).eq("id", step.id),
+        payloads
+      );
+
+      if (error) {
+        setMessage(error.message);
+        return;
+      }
+    }
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    if (!selectedFlavor || !event.over || event.active.id === event.over.id) {
+      return;
+    }
+
+    const oldIndex = selectedFlavor.steps.findIndex((step) => step.id === event.active.id);
+    const newIndex = selectedFlavor.steps.findIndex((step) => step.id === event.over.id);
+
+    if (oldIndex < 0 || newIndex < 0) {
+      return;
+    }
+
+    const reordered = arrayMove(selectedFlavor.steps, oldIndex, newIndex).map((step, index) => ({
+      ...step,
+      orderBy: index + 1
+    }));
+
+    setFlavors((current) =>
+      current.map((flavor) =>
+        flavor.id === selectedFlavor.id ? { ...flavor, steps: reordered } : flavor
+      )
+    );
+    void persistStepOrder(selectedFlavor.id, reordered);
+  }
+
+  function toggleStepExpanded(stepId: string) {
+    setExpandedStepIds((current) =>
+      current.includes(stepId) ? current.filter((id) => id !== stepId) : [...current, stepId]
+    );
+  }
+
+  function duplicateFlavor(flavor: MatrixFlavorRecord) {
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+
+        const baseSlug = `${flavor.slug || toSlug(flavor.name)}-copy`;
+        let nextSlug = baseSlug;
+        let suffix = 2;
+        const existingSlugs = new Set(flavors.map((entry) => entry.slug));
+        while (existingSlugs.has(nextSlug)) {
+          nextSlug = `${baseSlug}-${suffix}`;
+          suffix += 1;
+        }
+
+        const flavorPayloads = buildFlavorPayloadCandidates(
+          {
+            name: `${flavor.name} Copy`,
+            slug: nextSlug,
+            description: flavor.description ?? "",
+            systemPrompt: flavor.systemPrompt ?? ""
+          },
+          flavor.raw
+        );
+
+        const { data, error } = await saveWithFallbacks(
+          (payload) => supabase.from("humor_flavors").insert(payload).select("*").single(),
+          flavorPayloads
+        );
+
+        if (error) {
+          setMessage(error.message);
+          return;
+        }
+
+        const createdFlavorId = String((data as Record<string, unknown>).id);
+        const copiedSteps: MatrixStepRecord[] = [];
+
+        for (const step of [...flavor.steps].sort((left, right) => left.orderBy - right.orderBy)) {
+          const stepPayloads = buildStepPayloadCandidates(toStepForm(step), createdFlavorId, step.orderBy, step.raw);
+          const result = await saveWithFallbacks(
+            (payload) => supabase.from("humor_flavor_steps").insert(payload).select("*").single(),
+            stepPayloads
+          );
+
+          if (result.error) {
+            setMessage(`Flavor duplicated, but a step copy failed: ${result.error.message}`);
+            break;
+          }
+
+          copiedSteps.push(
+            normalizeSavedStep(result.data as Record<string, unknown>, toStepForm(step), createdFlavorId, step.orderBy)
+          );
+        }
+
+        const duplicatedFlavor: MatrixFlavorRecord = {
+          id: createdFlavorId,
+          name: `${flavor.name} Copy`,
+          slug: nextSlug,
+          description: flavor.description,
+          systemPrompt: flavor.systemPrompt,
+          steps: copiedSteps,
+          raw: data as Record<string, unknown>
+        };
+
+        setFlavors((current) => [duplicatedFlavor, ...current]);
+        setSelectedFlavorId(duplicatedFlavor.id);
+        setMessage("Flavor duplicated.");
+      })();
+    });
+  }
+
+  return (
+    <main className="min-h-screen bg-[#020617] px-6 py-10 text-slate-100">
+      <div className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-[300px,1fr]">
+        <aside className="glass-panel rounded-[1.75rem] border border-slate-800 bg-slate-950/55 p-5">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.3em] text-cyan-400">Humor Flavors</p>
+              <h1 className="mt-2 text-2xl font-semibold">Flavors and steps</h1>
+            </div>
+            <AnimatedButton onClick={startCreateFlavor}>
+              <Plus className="mr-2 h-4 w-4" />
+              New
+            </AnimatedButton>
+          </div>
+
+          <div className="mt-5 space-y-3">
+            {flavors.map((flavor, index) => (
+              <motion.button
+                key={flavor.id}
+                type="button"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: index * 0.03 }}
+                whileHover={{ scale: 1.01 }}
+                onClick={() => setSelectedFlavorId(flavor.id)}
+                className={cn(
+                  "w-full rounded-[1.25rem] border p-4 text-left",
+                  selectedFlavorId === flavor.id
+                    ? "border-sky-500/60 bg-sky-500/10"
+                    : "border-slate-800 bg-slate-950/50"
+                )}
+              >
+                <p className="font-medium text-slate-100">{flavor.name}</p>
+                <p className="mt-1 text-sm text-slate-500">{flavor.slug}</p>
+                <p className="mt-2 text-xs text-slate-500">{flavor.steps.length} steps</p>
+              </motion.button>
+            ))}
+            {flavors.length === 0 ? (
+              <div className="rounded-[1.25rem] border border-dashed border-slate-800 p-5 text-sm text-slate-500">
+                No flavors yet. Create your first one.
+              </div>
+            ) : null}
+          </div>
+        </aside>
+
+        <div className="space-y-6">
+          <section className="glass-panel rounded-[1.75rem] border border-slate-800 bg-slate-950/55 p-6">
+            <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-cyan-400">
+                  {editingFlavorId ? "Edit Flavor" : "New Flavor"}
+                </p>
+                <h2 className="mt-2 text-2xl font-semibold">
+                  {editingFlavorId ? selectedFlavor?.name ?? "Update flavor" : "Create a new humor flavor"}
+                </h2>
+                <p className="mt-2 text-sm text-slate-400">
+                  Define the top-level flavor, then configure the execution steps below.
+                </p>
+              </div>
+
+              {selectedFlavor ? (
+                <div className="flex flex-wrap gap-3">
+                  <AnimatedButton glow={false} onClick={() => startEditFlavor(selectedFlavor)}>
+                    <Pencil className="mr-2 h-4 w-4" />
+                    Edit Selected
+                  </AnimatedButton>
+                  <AnimatedButton glow={false} onClick={() => duplicateFlavor(selectedFlavor)}>
+                    <Copy className="mr-2 h-4 w-4" />
+                    Duplicate Flavor
+                  </AnimatedButton>
+                  <AnimatedButton
+                    glow={false}
+                    className="border-rose-500/30 bg-rose-500/10 text-rose-100"
+                    onClick={() => deleteFlavor(selectedFlavor.id)}
+                  >
+                    <Trash2 className="mr-2 h-4 w-4" />
+                    Delete
+                  </AnimatedButton>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="mt-6 grid gap-5">
+              <label className="grid gap-2">
+                <span className="text-sm text-slate-300">Name</span>
+                <input
+                  value={flavorForm.name}
+                  onChange={(event) =>
+                    setFlavorForm((current) => ({
+                      ...current,
+                      name: event.target.value,
+                      slug: current.slug || toSlug(event.target.value)
+                    }))
+                  }
+                  className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                  placeholder="Dry Sarcasm"
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-slate-300">Slug</span>
+                <input
+                  value={flavorForm.slug}
+                  onChange={(event) =>
+                    setFlavorForm((current) => ({
+                      ...current,
+                      slug: event.target.value
+                    }))
+                  }
+                  className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                  placeholder="dry-sarcasm"
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-slate-300">Description</span>
+                <textarea
+                  rows={3}
+                  value={flavorForm.description}
+                  onChange={(event) =>
+                    setFlavorForm((current) => ({
+                      ...current,
+                      description: event.target.value
+                    }))
+                  }
+                  className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                  placeholder="What makes this humor flavor distinct?"
+                />
+              </label>
+
+              <label className="grid gap-2">
+                <span className="text-sm text-slate-300">System Prompt</span>
+                <textarea
+                  rows={5}
+                  value={flavorForm.systemPrompt}
+                  onChange={(event) =>
+                    setFlavorForm((current) => ({
+                      ...current,
+                      systemPrompt: event.target.value
+                    }))
+                  }
+                  className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
+                  placeholder="Define the overall flavor behavior here."
+                />
+              </label>
+
+              <div className="flex items-center justify-between">
+                <p className="text-sm text-slate-400">{message ?? " "}</p>
+                <AnimatedButton onClick={saveFlavor} disabled={pending || flavorForm.name.trim().length === 0}>
+                  <Save className="mr-2 h-4 w-4" />
+                  {pending ? "Saving..." : editingFlavorId ? "Save Flavor" : "Create Flavor"}
+                </AnimatedButton>
+              </div>
+            </div>
+          </section>
+
+          <section className="glass-panel rounded-[1.75rem] border border-slate-800 bg-slate-950/55 p-6">
+            <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 md:flex-row md:items-start md:justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-cyan-400">Flavor Steps</p>
+                <h2 className="mt-2 text-2xl font-semibold">
+                  {selectedFlavor ? `${selectedFlavor.name} pipeline` : "Select a flavor"}
+                </h2>
+                <p className="mt-2 text-sm text-slate-400">
+                  Outputs from earlier steps can be referenced with <span className="font-mono text-cyan-300">{"{{step_1_output}}"}</span>.
+                </p>
+              </div>
+
+              <AnimatedButton onClick={startCreateStep} disabled={!selectedFlavor}>
+                <Plus className="mr-2 h-4 w-4" />
+                Add Step
+              </AnimatedButton>
+            </div>
+
+            {selectedFlavor ? (
+              <div className="mt-6 grid gap-6 xl:grid-cols-[380px,1fr]">
+                <div className="space-y-4">
+                  <label className="grid gap-2">
+                    <span className="text-sm text-slate-300">Step Title</span>
+                    <input
+                      value={stepForm.title}
+                      onChange={(event) => setStepForm((current) => ({ ...current, title: event.target.value }))}
+                      className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                      placeholder="Celebrity Recognition"
+                    />
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-slate-300">Step Description</span>
+                    <textarea
+                      rows={3}
+                      value={stepForm.description}
+                      onChange={(event) => setStepForm((current) => ({ ...current, description: event.target.value }))}
+                      className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                      placeholder="What this step is responsible for."
+                    />
+                  </label>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="grid gap-2">
+                      <span className="text-sm text-slate-300">Model</span>
+                      <input
+                        value={stepForm.modelId}
+                        onChange={(event) => setStepForm((current) => ({ ...current, modelId: event.target.value }))}
+                        className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                        placeholder="gpt-4.1-mini"
+                      />
+                    </label>
+
+                    <label className="grid gap-2">
+                      <span className="text-sm text-slate-300">Temperature: {stepForm.temperature.toFixed(1)}</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        value={stepForm.temperature}
+                        onChange={(event) =>
+                          setStepForm((current) => ({
+                            ...current,
+                            temperature: Number(event.target.value)
+                          }))
+                        }
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="grid gap-2">
+                      <span className="text-sm text-slate-300">Input Type</span>
+                      <select
+                        value={stepForm.inputType}
+                        onChange={(event) =>
+                          setStepForm((current) => ({
+                            ...current,
+                            inputType: event.target.value as "image+text" | "text"
+                          }))
+                        }
+                        className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                      >
+                        <option value="text">Text only</option>
+                        <option value="image+text">Image + text</option>
+                      </select>
+                    </label>
+
+                    <label className="grid gap-2">
+                      <span className="text-sm text-slate-300">Output Type</span>
+                      <select
+                        value={stepForm.outputType}
+                        onChange={(event) =>
+                          setStepForm((current) => ({
+                            ...current,
+                            outputType: event.target.value as "string" | "array"
+                          }))
+                        }
+                        className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                      >
+                        <option value="string">String</option>
+                        <option value="array">Array</option>
+                      </select>
+                    </label>
+                  </div>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-slate-300">Step Type</span>
+                    <input
+                      value={stepForm.stepKind}
+                      onChange={(event) =>
+                        setStepForm((current) => {
+                          const nextKind = event.target.value;
+                          const isCachedType =
+                            nextKind === "celebrity_recognition" || nextKind === "image_description";
+                          return {
+                            ...current,
+                            stepKind: nextKind,
+                            reuseCachedAdminValues: isCachedType ? current.reuseCachedAdminValues : false
+                          };
+                        })
+                      }
+                      className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
+                      placeholder="celebrity_recognition"
+                    />
+                  </label>
+
+                  {stepForm.stepKind === "celebrity_recognition" || stepForm.stepKind === "image_description" ? (
+                    <label className="flex items-center gap-3 rounded-[1rem] border border-slate-800 bg-slate-950/60 px-4 py-3 text-sm text-slate-300">
+                      <input
+                        type="checkbox"
+                        checked={stepForm.reuseCachedAdminValues}
+                        onChange={(event) =>
+                          setStepForm((current) => ({
+                            ...current,
+                            reuseCachedAdminValues: event.target.checked
+                          }))
+                        }
+                      />
+                      Reuse cached admin values for this step
+                    </label>
+                  ) : null}
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-slate-300">System Prompt</span>
+                    <textarea
+                      rows={4}
+                      value={stepForm.systemPrompt}
+                      onChange={(event) =>
+                        setStepForm((current) => ({ ...current, systemPrompt: event.target.value }))
+                      }
+                      className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
+                    />
+                  </label>
+
+                  <label className="grid gap-2">
+                    <span className="text-sm text-slate-300">User Prompt</span>
+                    <textarea
+                      rows={7}
+                      value={stepForm.userPrompt}
+                      onChange={(event) =>
+                        setStepForm((current) => ({ ...current, userPrompt: event.target.value }))
+                      }
+                      className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
+                      placeholder="Use {{step_1_output}} to reference earlier outputs."
+                    />
+                  </label>
+
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-slate-500">
+                      Placeholder syntax: <span className="font-mono text-cyan-300">{"{{step_1_output}}"}</span>
+                    </p>
+                    <AnimatedButton onClick={saveStep} disabled={pending || stepForm.title.trim().length === 0}>
+                      <Save className="mr-2 h-4 w-4" />
+                      {editingStepId ? "Save Step" : "Create Step"}
+                    </AnimatedButton>
+                  </div>
+                </div>
+
+                <div>
+                  <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+                    <SortableContext
+                      items={selectedFlavor.steps.map((step) => step.id)}
+                      strategy={verticalListSortingStrategy}
+                    >
+                      <div className="space-y-3">
+                        {selectedFlavor.steps.map((step) => (
+                          <SortableStepCard
+                            key={step.id}
+                            step={step}
+                            expanded={expandedStepIds.includes(step.id)}
+                            onToggle={() => toggleStepExpanded(step.id)}
+                            onEdit={() => startEditStep(step)}
+                            onDelete={() => deleteStep(step.id)}
+                          />
+                        ))}
+                        {selectedFlavor.steps.length === 0 ? (
+                          <div className="rounded-[1.15rem] border border-dashed border-slate-800 p-6 text-sm text-slate-500">
+                            No steps yet. Add the first step for this humor flavor.
+                          </div>
+                        ) : null}
+                      </div>
+                    </SortableContext>
+                  </DndContext>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-6 text-sm text-slate-500">Create or select a flavor first.</div>
+            )}
+          </section>
+        </div>
+      </div>
+    </main>
+  );
+}
