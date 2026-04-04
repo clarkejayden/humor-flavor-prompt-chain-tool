@@ -1,8 +1,11 @@
 import { MatrixErrorState } from "@/components/matrix-error-state";
 import { SimpleFlavorManager } from "@/components/simple-flavor-manager";
 import { fetchMatrixBootstrap } from "@/lib/data/matrix";
+import { requireAdminProfile } from "@/lib/supabase/admin";
 
 export default async function FlavorEditorPage() {
+  await requireAdminProfile();
+
   try {
     const bootstrap = await fetchMatrixBootstrap();
 

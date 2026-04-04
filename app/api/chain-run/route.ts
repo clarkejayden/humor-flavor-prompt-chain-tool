@@ -1,9 +1,16 @@
 import { NextResponse } from "next/server";
 
 import { runFlavorChain } from "@/lib/chain-runner";
+import { getCurrentAdminProfile } from "@/lib/supabase/admin";
 
 export async function POST(request: Request) {
   try {
+    const adminContext = await getCurrentAdminProfile();
+
+    if (!adminContext?.allowed) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const body = (await request.json()) as {
       imageUrl: string;
       systemPrompt?: string | null;

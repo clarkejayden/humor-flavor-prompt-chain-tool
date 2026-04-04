@@ -2,9 +2,16 @@ import { NextResponse } from "next/server";
 
 import { executeImageSetStudy } from "@/lib/pipeline-executor";
 import type { MatrixFlavorRecord, MatrixImageRecord } from "@/lib/matrix/types";
+import { getCurrentAdminProfile } from "@/lib/supabase/admin";
 
 export async function POST(request: Request) {
   try {
+    const adminContext = await getCurrentAdminProfile();
+
+    if (!adminContext?.allowed) {
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    }
+
     const body = (await request.json()) as {
       flavor: MatrixFlavorRecord;
       images: MatrixImageRecord[];

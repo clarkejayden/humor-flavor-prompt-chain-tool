@@ -4,6 +4,13 @@ import { notFound } from "next/navigation";
 import type { ProfileRecord } from "@/lib/supabase/types";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
+export function isAllowedAdminProfile(profile: Pick<
+  ProfileRecord,
+  "is_superadmin" | "is_matrix_admin"
+> | null) {
+  return profile?.is_superadmin === true || profile?.is_matrix_admin === true;
+}
+
 export const getCurrentAdminProfile = cache(async () => {
   const supabase = createSupabaseServerClient();
   const {
@@ -28,7 +35,7 @@ export const getCurrentAdminProfile = cache(async () => {
     return null;
   }
 
-  const allowed = Boolean(data.is_superadmin || data.is_matrix_admin);
+  const allowed = isAllowedAdminProfile(data as ProfileRecord);
 
   return {
     user,

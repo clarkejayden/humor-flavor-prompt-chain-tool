@@ -1,5 +1,5 @@
 import { getImagePublicUrl } from "@/lib/images";
-import { getCurrentAdminProfile } from "@/lib/supabase/admin";
+import { getCurrentAdminProfile, requireAdminProfile } from "@/lib/supabase/admin";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 import type {
@@ -238,7 +238,7 @@ function normalizeResponse(row: Record<string, unknown>): MatrixResponseRecord {
 
 export async function fetchMatrixBootstrap(): Promise<MatrixExperimentBootstrap> {
   const supabase = createSupabaseServerClient();
-  const adminContext = await getCurrentAdminProfile();
+  const adminContext = await requireAdminProfile();
   const auth = normalizeAuth(adminContext);
 
   const [{ data: flavorRows, error: flavorError }, { data: imageRows, error: imageError }] =
