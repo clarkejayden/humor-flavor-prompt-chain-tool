@@ -303,8 +303,9 @@ export function FlavorWorkspace({
       return;
     }
 
+    const overId = event.over.id;
     const oldIndex = selectedFlavor.steps.findIndex((step) => step.id === event.active.id);
-    const newIndex = selectedFlavor.steps.findIndex((step) => step.id === event.over.id);
+    const newIndex = selectedFlavor.steps.findIndex((step) => step.id === overId);
 
     if (oldIndex < 0 || newIndex < 0) {
       return;

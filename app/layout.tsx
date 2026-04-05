@@ -1,14 +1,9 @@
 import type { Metadata } from "next";
-import { Space_Grotesk } from "next/font/google";
+import type { CSSProperties } from "react";
 
 import { ThemeProvider } from "@/components/theme-provider";
 
 import "./globals.css";
-
-const spaceGrotesk = Space_Grotesk({
-  subsets: ["latin"],
-  variable: "--font-sans"
-});
 
 export const metadata: Metadata = {
   title: "The Matrix | Humor Flavor Lab",
@@ -22,7 +17,15 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={spaceGrotesk.variable}>
+      <body
+        className="font-sans"
+        style={
+          {
+            "--font-sans":
+              '"Avenir Next", "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif'
+          } as CSSProperties
+        }
+      >
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
           <div className="mesh-overlay" />
           {children}

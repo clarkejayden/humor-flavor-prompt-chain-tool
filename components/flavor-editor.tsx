@@ -162,7 +162,9 @@ function SortableStepCard({
 export function FlavorEditor({ initialFlavors }: FlavorEditorProps) {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const [flavors, setFlavors] = useState(initialFlavors);
-  const [selectedFlavorId, setSelectedFlavorId] = useState(initialFlavors[0]?.id ?? null);
+  const [selectedFlavorId, setSelectedFlavorId] = useState<string | null>(
+    initialFlavors[0]?.id ?? null
+  );
   const [flavorModalOpen, setFlavorModalOpen] = useState(false);
   const [stepModalOpen, setStepModalOpen] = useState(false);
   const [runnerPending, startRunnerTransition] = useTransition();

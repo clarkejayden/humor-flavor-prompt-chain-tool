@@ -57,6 +57,8 @@ type StepFormState = {
 };
 
 type SaveResult = { error: { message: string } | null; data?: unknown };
+type AwaitableSaveResult = PromiseLike<SaveResult> | SaveResult;
+type SavePayload = Record<string, string | number | boolean | null | undefined>;
 
 function toSlug(value: string) {
   return value
@@ -120,7 +122,7 @@ function buildFlavorPayloadCandidates(
           ? "prompt"
           : null;
 
-  const candidates: Array<Record<string, string | null>> = [];
+  const candidates: SavePayload[] = [];
 
   if (preferredNameKey) {
     candidates.push({
@@ -182,7 +184,7 @@ function buildStepPayloadCandidates(
   const orderKey =
     "order_by" in raw ? "order_by" : "execution_order" in raw ? "execution_order" : "order_by";
 
-  const candidates: Array<Record<string, string | number | boolean | null>> = [
+  const candidates: SavePayload[] = [
     {
       [relationKey]: flavorId,
       [orderKey]: executionOrder,
@@ -257,8 +259,8 @@ function buildStepPayloadCandidates(
 }
 
 async function saveWithFallbacks(
-  operation: (payload: Record<string, string | number | boolean | null>) => Promise<SaveResult>,
-  payloads: Array<Record<string, string | number | boolean | null>>
+  operation: (payload: SavePayload) => AwaitableSaveResult,
+  payloads: SavePayload[]
 ) {
   let lastError: string | null = null;
 
@@ -416,7 +418,9 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [flavors, setFlavors] = useState(initialFlavors);
-  const [selectedFlavorId, setSelectedFlavorId] = useState(initialFlavors[0]?.id ?? null);
+  const [selectedFlavorId, setSelectedFlavorId] = useState<string | null>(
+    initialFlavors[0]?.id ?? null
+  );
   const [editingFlavorId, setEditingFlavorId] = useState<string | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [expandedStepIds, setExpandedStepIds] = useState<string[]>([]);
@@ -686,8 +690,9 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
       return;
     }
 
+    const overId = event.over.id;
     const oldIndex = selectedFlavor.steps.findIndex((step) => step.id === event.active.id);
-    const newIndex = selectedFlavor.steps.findIndex((step) => step.id === event.over.id);
+    const newIndex = selectedFlavor.steps.findIndex((step) => step.id === overId);
 
     if (oldIndex < 0 || newIndex < 0) {
       return;
