@@ -1,37 +1,9 @@
 import type {
   MatrixFlavorRecord,
   MatrixImageRecord,
-  MatrixStepRecord,
   PipelineExecutionResult,
   PipelineStepExecution
 } from "@/lib/matrix/types";
-
-const PLACEHOLDER_REGEX = /\{\{\s*step_(\d+)\s*\}\}/gi;
-
-function resolvePlaceholders(template: string, previousOutputs: string[]) {
-  return template.replace(PLACEHOLDER_REGEX, (match, rawIndex) => {
-    const value = previousOutputs[Number(rawIndex) - 1];
-    return typeof value === "string" ? value : match;
-  });
-}
-
-function detectLoadedValue(step: MatrixStepRecord, image: MatrixImageRecord) {
-  if (!step.reuseCachedAdminValues) {
-    return null;
-  }
-
-  const key = `${step.title} ${step.stepKind ?? ""}`.toLowerCase();
-
-  if (key.includes("celebrity")) {
-    return image.loadedValues.celebrity_recognition ?? null;
-  }
-
-  if (key.includes("image description") || key.includes("description")) {
-    return image.loadedValues.image_description ?? null;
-  }
-
-  return null;
-}
 
 function extractOutput(payload: unknown, outputType: "string" | "array") {
   if (outputType === "array") {
@@ -63,82 +35,260 @@ function extractOutput(payload: unknown, outputType: "string" | "array") {
   return JSON.stringify(payload);
 }
 
-async function executeStep(
-  step: MatrixStepRecord,
+function buildMockStepOutput(
   flavor: MatrixFlavorRecord,
   image: MatrixImageRecord,
-  previousOutputs: string[],
+  stepTitle: string
+) {
+  const description =
+    image.loadedValues.image_description ??
+    `${image.title} with no stored description`;
+  const celebrity = image.loadedValues.celebrity_recognition ?? "unknown subject";
+
+  return [
+    `[mock:${stepTitle}]`,
+    `Flavor: ${flavor.name}`,
+    `Image: ${image.title}`,
+    `Description: ${description}`,
+    `Subject: ${celebrity}`
+  ].join("\n");
+}
+
+function normalizeApiBaseUrl(endpoint: string) {
+  return endpoint.endsWith("/") ? endpoint.slice(0, -1) : endpoint;
+}
+
+function inferContentType(image: MatrixImageRecord) {
+  const raw = image.raw;
+  const candidates = [
+    typeof raw.content_type === "string" ? raw.content_type : null,
+    typeof raw.mime_type === "string" ? raw.mime_type : null,
+    image.publicUrl,
+    typeof raw.object_path === "string" ? raw.object_path : null,
+    typeof raw.storage_path === "string" ? raw.storage_path : null
+  ].filter((value): value is string => Boolean(value));
+
+  for (const candidate of candidates) {
+    const lower = candidate.toLowerCase();
+    if (lower.includes(".png")) return "image/png";
+    if (lower.includes(".webp")) return "image/webp";
+    if (lower.includes(".gif")) return "image/gif";
+    if (lower.includes(".heic")) return "image/heic";
+    if (lower.includes(".jpg") || lower.includes(".jpeg")) return "image/jpeg";
+    if (lower.startsWith("image/")) return lower;
+  }
+
+  return "image/jpeg";
+}
+
+async function parseJsonResponse(response: Response) {
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function extractCaptionText(captionsPayload: unknown) {
+  if (!Array.isArray(captionsPayload)) {
+    return extractOutput(captionsPayload, "string");
+  }
+
+  const values = captionsPayload
+    .map((entry) => {
+      if (typeof entry === "string") {
+        return entry;
+      }
+
+      if (entry && typeof entry === "object") {
+        return extractOutput(entry, "string");
+      }
+
+      return null;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+
+  return values.join("\n\n");
+}
+
+async function executeCaptionApiFlow(
+  flavor: MatrixFlavorRecord,
+  image: MatrixImageRecord,
   endpoint: string,
   fetchImpl: typeof fetch,
   apiKey?: string
-): Promise<PipelineStepExecution> {
-  const loadedValue = detectLoadedValue(step, image);
-  const resolvedPrompt = resolvePlaceholders(step.prompt, previousOutputs);
+): Promise<PipelineExecutionResult> {
+  const stepTitle = "Caption API";
+  const startedAt = Date.now();
 
-  if (loadedValue) {
+  if (!apiKey) {
+    const outputText = buildMockStepOutput(flavor, image, stepTitle);
+
     return {
-      stepId: step.id,
-      title: step.title,
-      resolvedPrompt,
-      outputText: loadedValue,
-      skippedWithLoadedValue: true,
-      modelId: step.modelId,
-      temperature: step.temperature,
-      processingTimeSeconds: 0,
-      inputType: step.inputType,
-      outputType: step.outputType,
-      rawResponse: { source: "loaded_value", value: loadedValue }
+      imageId: image.id,
+      imageTitle: image.title,
+      finalCaption: outputText,
+      steps: [
+        {
+          stepId: `mock-${image.id}`,
+          title: stepTitle,
+          resolvedPrompt: `Mock caption output for ${flavor.name}`,
+          outputText,
+          skippedWithLoadedValue: false,
+          modelId: "mock-local",
+          temperature: null,
+          processingTimeSeconds: 0,
+          inputType: "image+text",
+          outputType: "string",
+          rawResponse: { source: "mock_executor", reason: "Missing ALMOSTCRACKD_API_KEY" }
+        }
+      ],
+      modelId: "mock-local",
+      temperature: null,
+      processingTimeSeconds: 0
     };
   }
 
-  const startedAt = Date.now();
-  const response = await fetchImpl(endpoint, {
+  if (!image.publicUrl) {
+    throw new Error(`Image ${image.title} is missing a public URL.`);
+  }
+
+  const baseUrl = normalizeApiBaseUrl(endpoint);
+  const contentType = inferContentType(image);
+
+  const presignResponse = await fetchImpl(`${baseUrl}/pipeline/generate-presigned-url`, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json",
-      ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
     },
-    body: JSON.stringify({
-      input_type: step.inputType,
-      output_type: step.outputType,
-      image_url: step.inputType === "image+text" ? image.publicUrl : undefined,
-      prompt: resolvedPrompt,
-      system_prompt: step.systemPrompt ?? flavor.systemPrompt ?? undefined,
-      model_id: step.modelId ?? undefined,
-      temperature: step.temperature ?? undefined
-    })
+    body: JSON.stringify({ contentType })
   });
 
-  if (!response.ok) {
-    const errorBody = await response.text();
+  if (!presignResponse.ok) {
+    const errorBody = await presignResponse.text();
     throw new Error(
-      `Pipeline step failed with ${response.status} for ${step.title}. Response: ${errorBody || "No response body."}`
+      `Failed to generate upload URL (${presignResponse.status}). ${errorBody || "No response body."}`
     );
   }
 
-  const payload = await response.json();
-  const payloadRecord = payload as Record<string, unknown>;
+  const presignPayload = (await presignResponse.json()) as {
+    presignedUrl?: string;
+    cdnUrl?: string;
+  };
+
+  if (!presignPayload.presignedUrl || !presignPayload.cdnUrl) {
+    throw new Error("Upload URL response did not include both presignedUrl and cdnUrl.");
+  }
+
+  const sourceImageResponse = await fetchImpl(image.publicUrl);
+  if (!sourceImageResponse.ok) {
+    const errorBody = await sourceImageResponse.text();
+    throw new Error(
+      `Failed to fetch source image (${sourceImageResponse.status}). ${errorBody || "No response body."}`
+    );
+  }
+
+  const imageBytes = await sourceImageResponse.arrayBuffer();
+  const uploadResponse = await fetchImpl(presignPayload.presignedUrl, {
+    method: "PUT",
+    headers: {
+      "Content-Type": contentType
+    },
+    body: imageBytes
+  });
+
+  if (!uploadResponse.ok) {
+    const errorBody = await uploadResponse.text();
+    throw new Error(
+      `Failed to upload image bytes (${uploadResponse.status}). ${errorBody || "No response body."}`
+    );
+  }
+
+  const registerResponse = await fetchImpl(`${baseUrl}/pipeline/upload-image-from-url`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      imageUrl: presignPayload.cdnUrl,
+      isCommonUse: false
+    })
+  });
+
+  if (!registerResponse.ok) {
+    const errorBody = await registerResponse.text();
+    throw new Error(
+      `Failed to register uploaded image (${registerResponse.status}). ${errorBody || "No response body."}`
+    );
+  }
+
+  const registerPayload = (await registerResponse.json()) as {
+    imageId?: string;
+  };
+
+  if (!registerPayload.imageId) {
+    throw new Error("Image registration response did not include imageId.");
+  }
+
+  const generateResponse = await fetchImpl(`${baseUrl}/pipeline/generate-captions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      imageId: registerPayload.imageId,
+      humorFlavorId: flavor.id
+    })
+  });
+
+  if (!generateResponse.ok) {
+    const errorBody = await generateResponse.text();
+    throw new Error(
+      `Failed to generate captions (${generateResponse.status}). ${errorBody || "No response body."}`
+    );
+  }
+
+  const captionsPayload = await parseJsonResponse(generateResponse);
+  const outputText = extractCaptionText(captionsPayload);
+  const processingTimeSeconds = (Date.now() - startedAt) / 1000;
 
   return {
-    stepId: step.id,
-    title: step.title,
-    resolvedPrompt,
-    outputText: extractOutput(payload, step.outputType),
-    skippedWithLoadedValue: false,
-    modelId:
-      (typeof payloadRecord.model_id === "string" ? payloadRecord.model_id : null) ??
-      step.modelId,
-    temperature:
-      typeof payloadRecord.temperature === "number"
-        ? (payloadRecord.temperature as number)
-        : step.temperature,
-    processingTimeSeconds:
-      typeof payloadRecord.processing_time_seconds === "number"
-        ? (payloadRecord.processing_time_seconds as number)
-        : (Date.now() - startedAt) / 1000,
-    inputType: step.inputType,
-    outputType: step.outputType,
-    rawResponse: payload
+    imageId: image.id,
+    imageTitle: image.title,
+    finalCaption: outputText,
+    steps: [
+      {
+        stepId: registerPayload.imageId,
+        title: stepTitle,
+        resolvedPrompt: `POST ${baseUrl}/pipeline/generate-captions`,
+        outputText,
+        skippedWithLoadedValue: false,
+        modelId: null,
+        temperature: null,
+        processingTimeSeconds,
+        inputType: "image+text",
+        outputType: "string",
+        rawResponse: {
+          upload: {
+            contentType,
+            cdnUrl: presignPayload.cdnUrl
+          },
+          register: registerPayload,
+          captions: captionsPayload
+        }
+      }
+    ],
+    modelId: null,
+    temperature: null,
+    processingTimeSeconds
   };
 }
 
@@ -153,30 +303,7 @@ export async function executePipelineForImage(
   const endpoint = options?.endpoint ?? "https://api.almostcrackd.ai/";
   const apiKey = process.env.ALMOSTCRACKD_API_KEY;
   const fetchImpl = options?.fetchImpl ?? fetch;
-  const steps = [...flavor.steps].sort((left, right) => left.orderBy - right.orderBy);
-  const results: PipelineStepExecution[] = [];
-  const outputs: string[] = [];
-
-  for (const step of steps) {
-    const result = await executeStep(step, flavor, image, outputs, endpoint, fetchImpl, apiKey);
-    results.push(result);
-    outputs.push(result.outputText);
-  }
-
-  const last = results.at(-1) ?? null;
-
-  return {
-    imageId: image.id,
-    imageTitle: image.title,
-    finalCaption: last?.outputText ?? "",
-    steps: results,
-    modelId: last?.modelId ?? null,
-    temperature: last?.temperature ?? null,
-    processingTimeSeconds: results.reduce(
-      (total, step) => total + (step.processingTimeSeconds ?? 0),
-      0
-    )
-  };
+  return executeCaptionApiFlow(flavor, image, endpoint, fetchImpl, apiKey);
 }
 
 export async function executeImageSetStudy(
