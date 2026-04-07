@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import {
   closestCenter,
   DndContext,
@@ -18,9 +18,11 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  AlertCircle,
   CheckCircle2,
   ChevronRight,
   Cpu,
+  Filter,
   GripVertical,
   ImageIcon,
   Layers3,
@@ -40,6 +42,33 @@ import type {
   PipelineExecutionResult
 } from "@/lib/matrix/types";
 import { cn } from "@/lib/utils";
+
+type RunLifecycleStatus = "idle" | "queued" | "uploading" | "registering" | "captioning" | "complete" | "failed";
+type FlavorSortMode = "recent" | "name" | "step-count";
+
+function readFlavorUpdatedAt(flavor: MatrixFlavorRecord) {
+  const value = flavor.raw.updated_at ?? flavor.raw.created_at ?? flavor.raw.inserted_at;
+  return typeof value === "string" && value.trim().length > 0 ? value : new Date(0).toISOString();
+}
+
+function formatRunStatusLabel(status: RunLifecycleStatus) {
+  switch (status) {
+    case "queued":
+      return "Queued";
+    case "uploading":
+      return "Uploading";
+    case "registering":
+      return "Registering";
+    case "captioning":
+      return "Captioning";
+    case "complete":
+      return "Complete";
+    case "failed":
+      return "Failed";
+    default:
+      return "Idle";
+  }
+}
 
 function SortableStep({
   step
@@ -178,11 +207,42 @@ export function FlavorWorkspace({
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [imageQuery, setImageQuery] = useState("");
+  const [flavorQuery, setFlavorQuery] = useState("");
+  const [flavorSortMode, setFlavorSortMode] = useState<FlavorSortMode>("recent");
+  const [runStatus, setRunStatus] = useState<RunLifecycleStatus>("idle");
+  const [runStatusDetail, setRunStatusDetail] = useState<string>("No active test");
+  const [imageStatuses, setImageStatuses] = useState<Record<string, RunLifecycleStatus>>({});
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  const deferredFlavorQuery = useDeferredValue(flavorQuery);
 
   const selectedFlavor = flavors.find((flavor) => flavor.id === selectedFlavorId) ?? null;
   const selectedImages = bootstrap.images.filter((image) => selectedImageIds.includes(image.id));
   const activeTest = activeTests.find((entry) => entry.flavorId === selectedFlavorId) ?? null;
+  const visibleFlavors = useMemo(() => {
+    const query = deferredFlavorQuery.trim().toLowerCase();
+
+    return [...flavors]
+      .filter((flavor) => {
+        if (!query) {
+          return true;
+        }
+
+        return [flavor.name, flavor.slug, flavor.description ?? ""].some((value) =>
+          value.toLowerCase().includes(query)
+        );
+      })
+      .sort((left, right) => {
+        if (flavorSortMode === "name") {
+          return left.name.localeCompare(right.name);
+        }
+
+        if (flavorSortMode === "step-count") {
+          return right.steps.length - left.steps.length || left.name.localeCompare(right.name);
+        }
+
+        return readFlavorUpdatedAt(right).localeCompare(readFlavorUpdatedAt(left));
+      });
+  }, [deferredFlavorQuery, flavorSortMode, flavors]);
   const visibleImages = useMemo(() => {
     const query = imageQuery.trim().toLowerCase();
 
@@ -217,6 +277,11 @@ export function FlavorWorkspace({
 
     setRunning(true);
     setError(null);
+    setRunStatus("queued");
+    setRunStatusDetail(`Queued ${selectedImages.length} image${selectedImages.length === 1 ? "" : "s"} for ${selectedFlavor.name}.`);
+    setImageStatuses(
+      Object.fromEntries(selectedImages.map((image) => [image.id, "queued" as RunLifecycleStatus]))
+    );
     startTest({
       flavorId: selectedFlavor.id,
       imageIds: selectedImages.map((image) => image.id),
@@ -270,19 +335,33 @@ export function FlavorWorkspace({
           }
 
           const event = JSON.parse(line) as
+            | { type: "status"; imageId: string; imageTitle: string; status: Exclude<RunLifecycleStatus, "idle"> }
             | { type: "progress"; completed: number; total: number; result: PipelineExecutionResult }
             | { type: "done"; results: PipelineExecutionResult[] }
             | { type: "error"; error: string };
+
+          if (event.type === "status") {
+            setImageStatuses((current) => ({
+              ...current,
+              [event.imageId]: event.status
+            }));
+            setRunStatus(event.status);
+            setRunStatusDetail(`${formatRunStatusLabel(event.status)} ${event.imageTitle}`);
+          }
 
           if (event.type === "progress") {
             collected.push(event.result);
             setResultGrid([...collected]);
             updateTestProgress(selectedFlavor.id, event.completed, event.total);
+            setRunStatus("captioning");
+            setRunStatusDetail(`Completed ${event.completed} of ${event.total} images.`);
           }
 
           if (event.type === "done") {
             setResultGrid(event.results);
             finishTest(selectedFlavor.id, event.results);
+            setRunStatus("complete");
+            setRunStatusDetail(`Finished ${event.results.length} image${event.results.length === 1 ? "" : "s"}.`);
           }
 
           if (event.type === "error") {
@@ -292,6 +371,8 @@ export function FlavorWorkspace({
       }
     } catch (caughtError) {
       finishTest(selectedFlavor.id, []);
+      setRunStatus("failed");
+      setRunStatusDetail("The last study failed before completion.");
       setError(caughtError instanceof Error ? caughtError.message : "Unknown testing error.");
     } finally {
       setRunning(false);
@@ -356,13 +437,18 @@ export function FlavorWorkspace({
           <div className="glass-panel rounded-[1.5rem] border border-slate-800 bg-slate-950/55 p-5">
             <p className="text-xs uppercase tracking-[0.28em] text-cyan-400">3. Status</p>
             <div className="mt-2 flex items-center gap-2 text-2xl font-semibold">
-              {running || activeTest ? (
+              {runStatus === "failed" ? (
+                <>
+                  <AlertCircle className="h-5 w-5 text-rose-400" />
+                  Failed
+                </>
+              ) : running || activeTest ? (
                 <>
                   <span className="relative flex h-3 w-3">
                     <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-cyan-400 opacity-75" />
                     <span className="relative inline-flex h-3 w-3 rounded-full bg-cyan-400" />
                   </span>
-                  Running
+                  {formatRunStatusLabel(runStatus)}
                 </>
               ) : (
                 <>
@@ -372,7 +458,7 @@ export function FlavorWorkspace({
               )}
             </div>
             <p className="mt-1 text-sm text-slate-400">
-              {activeTest ? `${activeTest.progress}/${activeTest.total} complete` : "No active test"}
+              {activeTest ? `${activeTest.progress}/${activeTest.total} complete • ${runStatusDetail}` : runStatusDetail}
             </p>
           </div>
         </section>
@@ -386,13 +472,39 @@ export function FlavorWorkspace({
               </div>
               <Layers3 className="h-5 w-5 text-sky-400" />
             </div>
+            <div className="mt-5 space-y-3 rounded-[1.25rem] border border-slate-800 bg-slate-950/60 p-3">
+              <label className="flex items-center gap-3 rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3">
+                <Search className="h-4 w-4 text-slate-500" />
+                <input
+                  value={flavorQuery}
+                  onChange={(event) => setFlavorQuery(event.target.value)}
+                  placeholder="Search flavors"
+                  className="w-full bg-transparent text-sm text-slate-200 outline-none placeholder:text-slate-500"
+                />
+              </label>
+              <label className="grid min-w-0 gap-2">
+                <span className="flex items-center gap-2 text-xs uppercase tracking-[0.18em] text-slate-500">
+                  <Filter className="h-3.5 w-3.5" />
+                  Sort
+                </span>
+                <select
+                  value={flavorSortMode}
+                  onChange={(event) => setFlavorSortMode(event.target.value as FlavorSortMode)}
+                  className="min-w-0 w-full rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 pr-10 text-sm text-slate-100 outline-none"
+                >
+                  <option value="recent">Recently updated</option>
+                  <option value="name">Name A-Z</option>
+                  <option value="step-count">Most steps</option>
+                </select>
+              </label>
+            </div>
             <motion.div
               className="mt-5 space-y-3"
               initial="hidden"
               animate="visible"
               variants={{ visible: { transition: { staggerChildren: 0.06 } } }}
             >
-              {flavors.map((flavor) => (
+              {visibleFlavors.map((flavor) => (
                 <motion.button
                   key={flavor.id}
                   variants={{ hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } }}
@@ -415,6 +527,11 @@ export function FlavorWorkspace({
                   </div>
                 </motion.button>
               ))}
+              {visibleFlavors.length === 0 ? (
+                <div className="rounded-[1.3rem] border border-dashed border-slate-800 p-4 text-sm text-slate-400">
+                  No flavors match this search. Try clearing the query or sorting by most steps to find fuller test pipelines.
+                </div>
+              ) : null}
             </motion.div>
           </aside>
 
@@ -467,7 +584,7 @@ export function FlavorWorkspace({
                         </div>
                       ))}
                       {(inspectionResult?.steps ?? resultGrid[0]?.steps ?? []).length === 0 ? (
-                        <p className="text-slate-500">Run a study, then inspect any result for full chain history.</p>
+                        <p className="text-slate-500">Run a study to populate the chain log, then inspect any result for the full prompt and output history.</p>
                       ) : null}
                     </div>
                     <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/70 p-3 text-sm text-slate-400">
@@ -507,6 +624,7 @@ export function FlavorWorkspace({
                 <div className="mt-5 grid grid-cols-2 gap-3 xl:grid-cols-3">
                   {visibleImages.map((image) => {
                     const selected = selectedImageIds.includes(image.id);
+                    const status = imageStatuses[image.id] ?? "idle";
                     return (
                       <button
                         key={image.id}
@@ -527,13 +645,25 @@ export function FlavorWorkspace({
                           ) : null}
                         </div>
                         <div className="flex items-center justify-between bg-slate-950/75 p-3 text-sm text-slate-300">
-                          <span className="truncate">{image.title}</span>
+                          <div className="min-w-0">
+                            <span className="block truncate">{image.title}</span>
+                            {selected ? (
+                              <span className="mt-1 inline-flex rounded-full border border-slate-700 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-slate-400">
+                                {formatRunStatusLabel(status)}
+                              </span>
+                            ) : null}
+                          </div>
                           {selected ? <CheckCircle2 className="h-4 w-4 shrink-0 text-sky-400" /> : null}
                         </div>
                       </button>
                     );
                   })}
                 </div>
+                {visibleImages.length === 0 ? (
+                  <div className="mt-4 rounded-[1.25rem] border border-dashed border-slate-800 p-5 text-sm text-slate-400">
+                    No images match that query. Search by title or clear the filter to pick a small study set.
+                  </div>
+                ) : null}
                 {error ? <p className="mt-4 text-sm text-rose-300">{error}</p> : null}
               </div>
 
@@ -563,8 +693,8 @@ export function FlavorWorkspace({
                     </div>
                   ))}
                   {resultGrid.length === 0 ? (
-                    <div className="rounded-[1.4rem] border border-dashed border-slate-800 p-6 text-sm text-slate-500">
-                      No executions yet.
+                    <div className="rounded-[1.4rem] border border-dashed border-slate-800 p-6 text-sm text-slate-400">
+                      No executions yet. Select a flavor, choose a few images, and run a study to compare caption outcomes here.
                     </div>
                   ) : null}
                 </div>

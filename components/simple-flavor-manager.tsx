@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useTransition } from "react";
+import { useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 import {
   closestCenter,
   DndContext,
@@ -20,9 +20,13 @@ import { motion } from "framer-motion";
 import {
   ChevronDown,
   Copy,
+  Filter,
+  GraduationCap,
   GripVertical,
+  History,
   Pencil,
   Plus,
+  Search,
   Save,
   Trash2
 } from "lucide-react";
@@ -59,6 +63,38 @@ type StepFormState = {
 type SaveResult = { error: { message: string } | null; data?: unknown };
 type AwaitableSaveResult = PromiseLike<SaveResult> | SaveResult;
 type SavePayload = Record<string, string | number | boolean | null | undefined>;
+type TutorialStep = {
+  selector: string;
+  title: string;
+  description: string;
+  example: string;
+};
+
+type FlavorRevisionSnapshot = {
+  id: string;
+  savedAt: string;
+  source: string;
+  flavorId: string | null;
+  flavorName: string;
+  form: FlavorFormState;
+};
+
+type StepRevisionSnapshot = {
+  id: string;
+  savedAt: string;
+  source: string;
+  flavorId: string;
+  stepId: string | null;
+  stepTitle: string;
+  form: StepFormState;
+};
+
+type FlavorSortMode = "recent" | "name" | "step-count";
+type FlavorFilterMode = "all" | "with-steps" | "without-steps";
+
+const FLAVOR_HISTORY_STORAGE_KEY = "matrix-flavor-history";
+const STEP_HISTORY_STORAGE_KEY = "matrix-step-history";
+const MAX_HISTORY_ENTRIES = 12;
 
 function toSlug(value: string) {
   return value
@@ -316,17 +352,158 @@ function toStepForm(step: MatrixStepRecord): StepFormState {
   };
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function toIsoTimestamp(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value
+    : new Date(0).toISOString();
+}
+
+function readFlavorUpdatedAt(flavor: MatrixFlavorRecord) {
+  return toIsoTimestamp(
+    flavor.raw.updated_at ?? flavor.raw.created_at ?? flavor.raw.inserted_at ?? flavor.raw.saved_at
+  );
+}
+
+function persistLocalSnapshots<T>(storageKey: string, entries: T[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(storageKey, JSON.stringify(entries));
+}
+
+function readLocalSnapshots<T>(storageKey: string): T[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const raw = window.localStorage.getItem(storageKey);
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as T[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushHistoryEntry<T extends { id: string }>(entries: T[], nextEntry: T) {
+  return [nextEntry, ...entries.filter((entry) => entry.id !== nextEntry.id)].slice(0, MAX_HISTORY_ENTRIES);
+}
+
+function TutorialOverlay({
+  step,
+  stepIndex,
+  totalSteps,
+  targetRect,
+  onClose,
+  onNext,
+  onPrevious
+}: {
+  step: TutorialStep;
+  stepIndex: number;
+  totalSteps: number;
+  targetRect: DOMRect | null;
+  onClose: () => void;
+  onNext: () => void;
+  onPrevious: () => void;
+}) {
+  const cardWidth = 320;
+  const viewportWidth = typeof window === "undefined" ? 1280 : window.innerWidth;
+  const viewportHeight = typeof window === "undefined" ? 800 : window.innerHeight;
+  const cardLeft = clamp(
+    targetRect ? targetRect.left : viewportWidth / 2 - cardWidth / 2,
+    20,
+    viewportWidth - cardWidth - 20
+  );
+  const preferredTop = targetRect ? targetRect.bottom + 16 : viewportHeight / 2 - 120;
+  const fallbackTop = targetRect ? targetRect.top - 220 : preferredTop;
+  const cardTop = clamp(
+    preferredTop > viewportHeight - 240 ? fallbackTop : preferredTop,
+    20,
+    viewportHeight - 220
+  );
+
+  return (
+    <>
+      <div className="fixed inset-0 z-40 bg-slate-950/72 backdrop-blur-[2px]" onClick={onClose} />
+      {targetRect ? (
+        <div
+          className="pointer-events-none fixed z-50 rounded-[1.15rem] border-2 border-cyan-300 shadow-[0_0_0_9999px_rgba(2,6,23,0.72)] transition-all"
+          style={{
+            top: targetRect.top - 8,
+            left: targetRect.left - 8,
+            width: targetRect.width + 16,
+            height: targetRect.height + 16
+          }}
+        />
+      ) : null}
+      <div
+        className="fixed z-50 w-[320px] rounded-[1.4rem] border border-cyan-400/35 bg-slate-950/96 p-5 shadow-[0_22px_80px_-28px_rgba(34,211,238,0.55)]"
+        style={{ top: cardTop, left: cardLeft }}
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.28em] text-cyan-300">
+              Tutorial {stepIndex + 1}/{totalSteps}
+            </p>
+            <h3 className="mt-2 text-lg font-semibold text-white">{step.title}</h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-slate-700 px-2 py-1 text-xs text-slate-300 transition hover:border-slate-500 hover:text-white"
+          >
+            Close
+          </button>
+        </div>
+        <p className="mt-3 text-sm leading-6 text-slate-300">{step.description}</p>
+        <div className="mt-4 rounded-[1rem] border border-slate-800 bg-[#020817] p-3">
+          <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Example Input</p>
+          <p className="mt-2 whitespace-pre-wrap font-mono text-sm text-cyan-100">{step.example}</p>
+        </div>
+        <div className="mt-5 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={onPrevious}
+            disabled={stepIndex === 0}
+            className="rounded-full border border-slate-700 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            onClick={onNext}
+            className="rounded-full border border-cyan-400/35 bg-cyan-400/12 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-400/18"
+          >
+            {stepIndex === totalSteps - 1 ? "Finish" : "Next"}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function SortableStepCard({
   step,
   expanded,
   onToggle,
   onEdit,
+  onDuplicate,
   onDelete
 }: {
   step: MatrixStepRecord;
   expanded: boolean;
   onToggle: () => void;
   onEdit: () => void;
+  onDuplicate: () => void;
   onDelete: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -368,6 +545,10 @@ function SortableStepCard({
               <AnimatedButton glow={false} className="px-3 py-2 text-xs" onClick={onEdit}>
                 <Pencil className="mr-1 h-3.5 w-3.5" />
                 Edit
+              </AnimatedButton>
+              <AnimatedButton glow={false} className="px-3 py-2 text-xs" onClick={onDuplicate}>
+                <Copy className="mr-1 h-3.5 w-3.5" />
+                Duplicate
               </AnimatedButton>
               <AnimatedButton
                 glow={false}
@@ -418,6 +599,9 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [flavors, setFlavors] = useState(initialFlavors);
+  const [flavorQuery, setFlavorQuery] = useState("");
+  const [flavorSortMode, setFlavorSortMode] = useState<FlavorSortMode>("recent");
+  const [flavorFilterMode, setFlavorFilterMode] = useState<FlavorFilterMode>("all");
   const [selectedFlavorId, setSelectedFlavorId] = useState<string | null>(
     initialFlavors[0]?.id ?? null
   );
@@ -426,12 +610,203 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
   const [expandedStepIds, setExpandedStepIds] = useState<string[]>([]);
   const [flavorForm, setFlavorForm] = useState<FlavorFormState>(emptyFlavorForm);
   const [stepForm, setStepForm] = useState<StepFormState>(emptyStepForm);
+  const [flavorHistory, setFlavorHistory] = useState<FlavorRevisionSnapshot[]>([]);
+  const [stepHistory, setStepHistory] = useState<StepRevisionSnapshot[]>([]);
   const [message, setMessage] = useState<string | null>(null);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialIndex, setTutorialIndex] = useState(0);
+  const [tutorialTargetRect, setTutorialTargetRect] = useState<DOMRect | null>(null);
   const [pending, startTransition] = useTransition();
+  const deferredFlavorQuery = useDeferredValue(flavorQuery);
 
   const selectedFlavor = flavors.find((flavor) => flavor.id === selectedFlavorId) ?? null;
   const flavorSampleRaw = selectedFlavor?.raw ?? flavors[0]?.raw;
   const stepSampleRaw = selectedFlavor?.steps[0]?.raw;
+  const selectedFlavorHistory = useMemo(
+    () => flavorHistory.filter((entry) => entry.flavorId === selectedFlavorId || entry.flavorId === null).slice(0, 5),
+    [flavorHistory, selectedFlavorId]
+  );
+  const selectedStepHistory = useMemo(
+    () =>
+      stepHistory
+        .filter((entry) => entry.flavorId === selectedFlavorId && (editingStepId ? entry.stepId === editingStepId : true))
+        .slice(0, 5),
+    [editingStepId, selectedFlavorId, stepHistory]
+  );
+  const visibleFlavors = useMemo(() => {
+    const query = deferredFlavorQuery.trim().toLowerCase();
+
+    return [...flavors]
+      .filter((flavor) => {
+        if (flavorFilterMode === "with-steps" && flavor.steps.length === 0) {
+          return false;
+        }
+
+        if (flavorFilterMode === "without-steps" && flavor.steps.length > 0) {
+          return false;
+        }
+
+        if (!query) {
+          return true;
+        }
+
+        return [flavor.name, flavor.slug, flavor.description ?? ""].some((value) =>
+          value.toLowerCase().includes(query)
+        );
+      })
+      .sort((left, right) => {
+        if (flavorSortMode === "name") {
+          return left.name.localeCompare(right.name);
+        }
+
+        if (flavorSortMode === "step-count") {
+          return right.steps.length - left.steps.length || left.name.localeCompare(right.name);
+        }
+
+        return readFlavorUpdatedAt(right).localeCompare(readFlavorUpdatedAt(left));
+      });
+  }, [deferredFlavorQuery, flavorFilterMode, flavorSortMode, flavors]);
+  const tutorialSteps: TutorialStep[] = [
+    {
+      selector: '[data-tour="flavor-list"]',
+      title: "Flavor Library",
+      description:
+        "Use the left rail to browse humor flavors. Selecting one loads its details and step pipeline into the workspace.",
+      example: "Example action: click 'Dry Sarcasm' to inspect the current prompt chain."
+    },
+    {
+      selector: '[data-tour="new-flavor-button"]',
+      title: "Create a Flavor",
+      description:
+        "This starts a fresh flavor definition. The form resets so you can define a new style without overwriting the selected one.",
+      example: "Example input: make a flavor called 'Overconfident Wildlife Narrator'."
+    },
+    {
+      selector: '[data-tour="flavor-name"]',
+      title: "Flavor Name",
+      description:
+        "Give the flavor a clear, memorable name. This is the label editors use when choosing a caption style.",
+      example: "Example input: Deadpan Disaster Commentary"
+    },
+    {
+      selector: '[data-tour="flavor-description"]',
+      title: "Flavor Description",
+      description:
+        "Summarize the comedic voice in plain English so the team knows the intended tone before reading prompts.",
+      example:
+        "Example input: Calm, clinical narration for images that are obviously chaotic or embarrassing."
+    },
+    {
+      selector: '[data-tour="flavor-system-prompt"]',
+      title: "Flavor System Prompt",
+      description:
+        "This instruction sets the overall behavior for the flavor. It should describe the voice every downstream step supports.",
+      example:
+        "Example input: Write with dry understatement, precise phrasing, and zero theatrical excitement."
+    },
+    {
+      selector: '[data-tour="save-flavor-button"]',
+      title: "Save Flavor",
+      description:
+        "Persist your flavor changes after editing the name, slug, description, or system prompt.",
+      example: "Example action: save after renaming a flavor to 'Petty Historian'."
+    },
+    {
+      selector: '[data-tour="add-step-button"]',
+      title: "Add Step",
+      description:
+        "Build the pipeline one stage at a time. Each step can classify, describe, or transform the captioning workflow.",
+      example: "Example action: add step 1 as 'Image Description'."
+    },
+    {
+      selector: '[data-tour="step-title"]',
+      title: "Step Title",
+      description:
+        "Name the current step so the pipeline reads like an ordered workflow rather than a list of anonymous prompts.",
+      example: "Example input: Celebrity Recognition"
+    },
+    {
+      selector: '[data-tour="step-user-prompt"]',
+      title: "Step User Prompt",
+      description:
+        "This is the operational instruction for the current step. Be explicit about what the model should extract or rewrite.",
+      example:
+        "Example input: Identify the person in the image. If uncertain, return 'unknown'."
+    },
+    {
+      selector: '[data-tour="step-list"]',
+      title: "Step Pipeline",
+      description:
+        "Review saved steps here. You can expand, edit, delete, and drag them to change execution order.",
+      example: "Example action: drag 'Punchline Rewrite' after 'Caption Draft'."
+    }
+  ];
+  const activeTutorialStep = tutorialSteps[tutorialIndex] ?? null;
+
+  useEffect(() => {
+    setFlavorHistory(readLocalSnapshots<FlavorRevisionSnapshot>(FLAVOR_HISTORY_STORAGE_KEY));
+    setStepHistory(readLocalSnapshots<StepRevisionSnapshot>(STEP_HISTORY_STORAGE_KEY));
+  }, []);
+
+  useEffect(() => {
+    if (!tutorialOpen || !activeTutorialStep) {
+      setTutorialTargetRect(null);
+      return;
+    }
+
+    const target = document.querySelector(activeTutorialStep.selector);
+    if (!(target instanceof HTMLElement)) {
+      setTutorialTargetRect(null);
+      return;
+    }
+
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+
+    const updateRect = () => setTutorialTargetRect(target.getBoundingClientRect());
+    updateRect();
+    window.addEventListener("resize", updateRect);
+    window.addEventListener("scroll", updateRect, true);
+
+    return () => {
+      window.removeEventListener("resize", updateRect);
+      window.removeEventListener("scroll", updateRect, true);
+    };
+  }, [activeTutorialStep, tutorialOpen]);
+
+  function recordFlavorRevision(source: string, form: FlavorFormState, flavorId: string | null) {
+    const entry: FlavorRevisionSnapshot = {
+      id: `${flavorId ?? "draft"}:${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      source,
+      flavorId,
+      flavorName: form.name || "Untitled Flavor",
+      form
+    };
+
+    setFlavorHistory((current) => {
+      const next = pushHistoryEntry(current, entry);
+      persistLocalSnapshots(FLAVOR_HISTORY_STORAGE_KEY, next);
+      return next;
+    });
+  }
+
+  function recordStepRevision(source: string, form: StepFormState, flavorId: string, stepId: string | null) {
+    const entry: StepRevisionSnapshot = {
+      id: `${stepId ?? "draft"}:${Date.now()}`,
+      savedAt: new Date().toISOString(),
+      source,
+      flavorId,
+      stepId,
+      stepTitle: form.title || "Untitled Step",
+      form
+    };
+
+    setStepHistory((current) => {
+      const next = pushHistoryEntry(current, entry);
+      persistLocalSnapshots(STEP_HISTORY_STORAGE_KEY, next);
+      return next;
+    });
+  }
 
   function startCreateFlavor() {
     setEditingFlavorId(null);
@@ -501,6 +876,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                 : flavor
             )
           );
+          recordFlavorRevision("updated", flavorForm, editingFlavorId);
           setMessage("Flavor updated.");
           return;
         }
@@ -528,6 +904,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
         setFlavors((current) => [createdFlavor, ...current]);
         setSelectedFlavorId(createdFlavor.id);
         setEditingFlavorId(createdFlavor.id);
+        recordFlavorRevision("created", flavorForm, createdFlavor.id);
         setMessage("Flavor created.");
       })();
     });
@@ -593,6 +970,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                 : flavor
             )
           );
+          recordStepRevision("updated", stepForm, selectedFlavor.id, editingStepId);
           setMessage("Step updated.");
         } else {
           const { data, error } = await saveWithFallbacks(
@@ -617,6 +995,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
             )
           );
           setExpandedStepIds((current) => Array.from(new Set([...current, createdStep.id])));
+          recordStepRevision("created", stepForm, selectedFlavor.id, createdStep.id);
           setMessage("Step created.");
         }
 
@@ -783,9 +1162,89 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
 
         setFlavors((current) => [duplicatedFlavor, ...current]);
         setSelectedFlavorId(duplicatedFlavor.id);
+        recordFlavorRevision(
+          "duplicated",
+          {
+            name: duplicatedFlavor.name,
+            slug: duplicatedFlavor.slug,
+            description: duplicatedFlavor.description ?? "",
+            systemPrompt: duplicatedFlavor.systemPrompt ?? ""
+          },
+          duplicatedFlavor.id
+        );
         setMessage("Flavor duplicated.");
       })();
     });
+  }
+
+  function duplicateStep(step: MatrixStepRecord) {
+    if (!selectedFlavor) {
+      return;
+    }
+
+    startTransition(() => {
+      void (async () => {
+        setMessage(null);
+        const nextOrder = selectedFlavor.steps.length + 1;
+        const duplicatedForm = {
+          ...toStepForm(step),
+          title: `${step.title} Copy`
+        };
+        const stepPayloads = buildStepPayloadCandidates(duplicatedForm, selectedFlavor.id, nextOrder, step.raw);
+        const result = await saveWithFallbacks(
+          (payload) => supabase.from("humor_flavor_steps").insert(payload).select("*").single(),
+          stepPayloads
+        );
+
+        if (result.error) {
+          setMessage(result.error.message);
+          return;
+        }
+
+        const duplicatedStep = normalizeSavedStep(
+          result.data as Record<string, unknown>,
+          duplicatedForm,
+          selectedFlavor.id,
+          nextOrder
+        );
+        setFlavors((current) =>
+          current.map((flavor) =>
+            flavor.id === selectedFlavor.id
+              ? {
+                  ...flavor,
+                  steps: [...flavor.steps, duplicatedStep].sort((left, right) => left.orderBy - right.orderBy)
+                }
+              : flavor
+          )
+        );
+        setExpandedStepIds((current) => Array.from(new Set([...current, duplicatedStep.id])));
+        recordStepRevision("duplicated", duplicatedForm, selectedFlavor.id, duplicatedStep.id);
+        setMessage("Step duplicated.");
+      })();
+    });
+  }
+
+  function openTutorial() {
+    setTutorialIndex(0);
+    setTutorialOpen(true);
+  }
+
+  function closeTutorial() {
+    setTutorialOpen(false);
+    setTutorialTargetRect(null);
+  }
+
+  function goToNextTutorialStep() {
+    if (tutorialIndex === tutorialSteps.length - 1) {
+      closeTutorial();
+      return;
+    }
+
+    setTutorialIndex((current) => current + 1);
+  }
+
+  function goToPreviousTutorialStep() {
+    setTutorialIndex((current) => Math.max(0, current - 1));
   }
 
   return (
@@ -797,14 +1256,55 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
               <p className="text-xs uppercase tracking-[0.3em] text-cyan-400">Humor Flavors</p>
               <h1 className="mt-2 text-2xl font-semibold">Flavors and steps</h1>
             </div>
-            <AnimatedButton onClick={startCreateFlavor}>
+            <AnimatedButton onClick={startCreateFlavor} data-tour="new-flavor-button">
               <Plus className="mr-2 h-4 w-4" />
               New
             </AnimatedButton>
           </div>
 
-          <div className="mt-5 space-y-3">
-            {flavors.map((flavor, index) => (
+          <div className="mt-5 space-y-3 rounded-[1.25rem] border border-slate-800 bg-slate-950/55 p-3">
+            <label className="flex items-center gap-3 rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3">
+              <Search className="h-4 w-4 text-slate-500" />
+              <input
+                value={flavorQuery}
+                onChange={(event) => setFlavorQuery(event.target.value)}
+                placeholder="Search flavor name, slug, or tone"
+                className="w-full bg-transparent text-sm text-slate-100 outline-none placeholder:text-slate-500"
+              />
+            </label>
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid min-w-0 gap-2">
+                <span className="flex items-center gap-2 text-xs uppercase tracking-[0.2em] text-slate-500">
+                  <Filter className="h-3.5 w-3.5" />
+                  Filter
+                </span>
+                <select
+                  value={flavorFilterMode}
+                  onChange={(event) => setFlavorFilterMode(event.target.value as FlavorFilterMode)}
+                  className="min-w-0 w-full rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 pr-10 text-sm text-slate-100 outline-none"
+                >
+                  <option value="all">All flavors</option>
+                  <option value="with-steps">With steps</option>
+                  <option value="without-steps">Without steps</option>
+                </select>
+              </label>
+              <label className="grid min-w-0 gap-2">
+                <span className="text-xs uppercase tracking-[0.2em] text-slate-500">Sort</span>
+                <select
+                  value={flavorSortMode}
+                  onChange={(event) => setFlavorSortMode(event.target.value as FlavorSortMode)}
+                  className="min-w-0 w-full rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 pr-10 text-sm text-slate-100 outline-none"
+                >
+                  <option value="recent">Recently updated</option>
+                  <option value="name">Name A-Z</option>
+                  <option value="step-count">Most steps</option>
+                </select>
+              </label>
+            </div>
+          </div>
+
+          <div className="mt-5 space-y-3" data-tour="flavor-list">
+            {visibleFlavors.map((flavor, index) => (
               <motion.button
                 key={flavor.id}
                 type="button"
@@ -826,8 +1326,13 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
               </motion.button>
             ))}
             {flavors.length === 0 ? (
-              <div className="rounded-[1.25rem] border border-dashed border-slate-800 p-5 text-sm text-slate-500">
-                No flavors yet. Create your first one.
+              <div className="rounded-[1.25rem] border border-dashed border-slate-800 p-5 text-sm text-slate-400">
+                No flavors yet. Create your first flavor, add a system prompt, then duplicate it when you want a fast variant.
+              </div>
+            ) : null}
+            {flavors.length > 0 && visibleFlavors.length === 0 ? (
+              <div className="rounded-[1.25rem] border border-dashed border-slate-800 p-5 text-sm text-slate-400">
+                No flavors match the current search or filter. Clear the query or switch back to <span className="font-medium text-slate-200">All flavors</span>.
               </div>
             ) : null}
           </div>
@@ -884,6 +1389,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                   }
                   className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
                   placeholder="Dry Sarcasm"
+                  data-tour="flavor-name"
                 />
               </label>
 
@@ -915,6 +1421,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                   }
                   className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
                   placeholder="What makes this humor flavor distinct?"
+                  data-tour="flavor-description"
                 />
               </label>
 
@@ -931,15 +1438,59 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                   }
                   className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
                   placeholder="Define the overall flavor behavior here."
+                  data-tour="flavor-system-prompt"
                 />
               </label>
 
               <div className="flex items-center justify-between">
                 <p className="text-sm text-slate-400">{message ?? " "}</p>
-                <AnimatedButton onClick={saveFlavor} disabled={pending || flavorForm.name.trim().length === 0}>
+                <AnimatedButton
+                  onClick={saveFlavor}
+                  disabled={pending || flavorForm.name.trim().length === 0}
+                  data-tour="save-flavor-button"
+                >
                   <Save className="mr-2 h-4 w-4" />
                   {pending ? "Saving..." : editingFlavorId ? "Save Flavor" : "Create Flavor"}
                 </AnimatedButton>
+              </div>
+
+              <div className="rounded-[1.15rem] border border-slate-800 bg-[#020817] p-4">
+                <div className="flex items-center gap-2 text-sm text-cyan-300">
+                  <History className="h-4 w-4" />
+                  Flavor revision history
+                </div>
+                <div className="mt-4 space-y-3">
+                  {selectedFlavorHistory.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="flex items-center justify-between gap-3 rounded-[1rem] border border-slate-800 bg-slate-950/55 p-3"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-slate-100">{entry.flavorName}</p>
+                        <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
+                          {entry.source} • {new Date(entry.savedAt).toLocaleString()}
+                        </p>
+                      </div>
+                      <AnimatedButton
+                        glow={false}
+                        className="px-3 py-2 text-xs"
+                        onClick={() => {
+                          setEditingFlavorId(entry.flavorId);
+                          setSelectedFlavorId(entry.flavorId);
+                          setFlavorForm(entry.form);
+                          setMessage(`Loaded flavor revision from ${new Date(entry.savedAt).toLocaleString()}. Save to restore it.`);
+                        }}
+                      >
+                        Restore
+                      </AnimatedButton>
+                    </div>
+                  ))}
+                  {selectedFlavorHistory.length === 0 ? (
+                    <p className="text-sm text-slate-500">
+                      Save a flavor once and its recent revisions will appear here for quick rollback.
+                    </p>
+                  ) : null}
+                </div>
               </div>
             </div>
           </section>
@@ -956,7 +1507,11 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                 </p>
               </div>
 
-              <AnimatedButton onClick={startCreateStep} disabled={!selectedFlavor}>
+              <AnimatedButton
+                onClick={startCreateStep}
+                disabled={!selectedFlavor}
+                data-tour="add-step-button"
+              >
                 <Plus className="mr-2 h-4 w-4" />
                 Add Step
               </AnimatedButton>
@@ -972,6 +1527,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                       onChange={(event) => setStepForm((current) => ({ ...current, title: event.target.value }))}
                       className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 text-slate-100 outline-none"
                       placeholder="Celebrity Recognition"
+                      data-tour="step-title"
                     />
                   </label>
 
@@ -1110,6 +1666,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                       }
                       className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
                       placeholder="Use {{step_1_output}} to reference earlier outputs."
+                      data-tour="step-user-prompt"
                     />
                   </label>
 
@@ -1122,6 +1679,44 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                       {editingStepId ? "Save Step" : "Create Step"}
                     </AnimatedButton>
                   </div>
+
+                  <div className="rounded-[1.15rem] border border-slate-800 bg-[#020817] p-4">
+                    <div className="flex items-center gap-2 text-sm text-cyan-300">
+                      <History className="h-4 w-4" />
+                      Step revision history
+                    </div>
+                    <div className="mt-4 space-y-3">
+                      {selectedStepHistory.map((entry) => (
+                        <div
+                          key={entry.id}
+                          className="flex items-center justify-between gap-3 rounded-[1rem] border border-slate-800 bg-slate-950/55 p-3"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-slate-100">{entry.stepTitle}</p>
+                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-slate-500">
+                              {entry.source} • {new Date(entry.savedAt).toLocaleString()}
+                            </p>
+                          </div>
+                          <AnimatedButton
+                            glow={false}
+                            className="px-3 py-2 text-xs"
+                            onClick={() => {
+                              setEditingStepId(entry.stepId);
+                              setStepForm(entry.form);
+                              setMessage(`Loaded step revision from ${new Date(entry.savedAt).toLocaleString()}. Save to restore it.`);
+                            }}
+                          >
+                            Restore
+                          </AnimatedButton>
+                        </div>
+                      ))}
+                      {selectedStepHistory.length === 0 ? (
+                        <p className="text-sm text-slate-500">
+                          Save or duplicate a step to create a revision trail you can restore into the editor.
+                        </p>
+                      ) : null}
+                    </div>
+                  </div>
                 </div>
 
                 <div>
@@ -1130,7 +1725,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                       items={selectedFlavor.steps.map((step) => step.id)}
                       strategy={verticalListSortingStrategy}
                     >
-                      <div className="space-y-3">
+                      <div className="space-y-3" data-tour="step-list">
                         {selectedFlavor.steps.map((step) => (
                           <SortableStepCard
                             key={step.id}
@@ -1138,12 +1733,13 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                             expanded={expandedStepIds.includes(step.id)}
                             onToggle={() => toggleStepExpanded(step.id)}
                             onEdit={() => startEditStep(step)}
+                            onDuplicate={() => duplicateStep(step)}
                             onDelete={() => deleteStep(step.id)}
                           />
                         ))}
                         {selectedFlavor.steps.length === 0 ? (
-                          <div className="rounded-[1.15rem] border border-dashed border-slate-800 p-6 text-sm text-slate-500">
-                            No steps yet. Add the first step for this humor flavor.
+                          <div className="rounded-[1.15rem] border border-dashed border-slate-800 p-6 text-sm text-slate-400">
+                            No steps yet. Start with an image description or classification step, then duplicate it to branch into alternate caption variants.
                           </div>
                         ) : null}
                       </div>
@@ -1152,11 +1748,32 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                 </div>
               </div>
             ) : (
-              <div className="mt-6 text-sm text-slate-500">Create or select a flavor first.</div>
+              <div className="mt-6 rounded-[1.15rem] border border-dashed border-slate-800 p-6 text-sm text-slate-400">
+                Create a flavor first, then add one or two foundational steps before tuning the rest of the chain.
+              </div>
             )}
           </section>
         </div>
       </div>
+      <button
+        type="button"
+        onClick={openTutorial}
+        className="fixed bottom-5 left-5 z-30 inline-flex items-center gap-2 rounded-full border border-cyan-400/35 bg-slate-950/88 px-4 py-3 text-sm font-medium text-cyan-100 shadow-[0_18px_60px_-24px_rgba(34,211,238,0.65)] transition hover:border-cyan-300 hover:bg-slate-950"
+      >
+        <GraduationCap className="h-4 w-4" />
+        App Tutorial
+      </button>
+      {tutorialOpen && activeTutorialStep ? (
+        <TutorialOverlay
+          step={activeTutorialStep}
+          stepIndex={tutorialIndex}
+          totalSteps={tutorialSteps.length}
+          targetRect={tutorialTargetRect}
+          onClose={closeTutorial}
+          onNext={goToNextTutorialStep}
+          onPrevious={goToPreviousTutorialStep}
+        />
+      ) : null}
     </main>
   );
 }

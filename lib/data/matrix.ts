@@ -44,10 +44,10 @@ function normalizeAuth(
   adminContext: Awaited<ReturnType<typeof getCurrentAdminProfile>>
 ): MatrixAuthContext {
   return {
-    userId: adminContext?.user.id ?? null,
-    email: adminContext?.user.email ?? null,
-    isSuperadmin: Boolean(adminContext?.profile.is_superadmin),
-    isMatrixAdmin: Boolean(adminContext?.profile.is_matrix_admin),
+    userId: adminContext?.user?.id ?? null,
+    email: adminContext?.user?.email ?? null,
+    isSuperadmin: Boolean(adminContext?.profile?.is_superadmin),
+    isMatrixAdmin: Boolean(adminContext?.profile?.is_matrix_admin),
     allowed: Boolean(adminContext?.allowed)
   };
 }

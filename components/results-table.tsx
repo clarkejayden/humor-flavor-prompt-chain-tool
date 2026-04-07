@@ -81,7 +81,9 @@ export function ResultsTable({
             </motion.div>
           ))}
           {pageItems.length === 0 ? (
-            <div className="px-4 py-10 text-sm text-slate-500">No captions yet.</div>
+            <div className="px-4 py-10 text-sm text-slate-400">
+              No captions yet. Run a study in the Matrix to build a recent caption history you can review here.
+            </div>
           ) : null}
         </div>
       </div>

@@ -1,14 +1,13 @@
 import { cache } from "react";
-import { notFound } from "next/navigation";
 
 import type { ProfileRecord } from "@/lib/supabase/types";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 export function isAllowedAdminProfile(profile: Pick<
   ProfileRecord,
-  "is_superadmin" | "is_matrix_admin"
+  "is_superadmin"
 > | null) {
-  return profile?.is_superadmin === true || profile?.is_matrix_admin === true;
+  return profile?.is_superadmin === true;
 }
 
 export const getCurrentAdminProfile = cache(async () => {
@@ -18,14 +17,18 @@ export const getCurrentAdminProfile = cache(async () => {
   } = await supabase.auth.getUser();
 
   if (!user) {
-    return null;
+    return {
+      user: null,
+      profile: null,
+      allowed: false
+    };
   }
 
   const { data, error } = await supabase
     .from("profiles")
     .select("id,is_superadmin,is_matrix_admin")
     .eq("id", user.id)
-    .single();
+    .maybeSingle();
 
   if (error) {
     throw error;
@@ -45,11 +48,15 @@ export const getCurrentAdminProfile = cache(async () => {
 });
 
 export async function requireAdminProfile() {
-  const result = await getCurrentAdminProfile();
+  const adminContext = await getCurrentAdminProfile();
 
-  if (!result?.allowed) {
-    notFound();
+  if (!adminContext?.user) {
+    throw new Error("Authentication required.");
   }
 
-  return result;
+  if (!adminContext.allowed) {
+    throw new Error("Super admin access required.");
+  }
+
+  return adminContext;
 }

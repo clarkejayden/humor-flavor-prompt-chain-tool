@@ -1,12 +1,14 @@
 import { cookies } from "next/headers";
 import { createServerClient, type CookieOptions } from "@supabase/ssr";
+import { getSupabaseEnvErrorMessage } from "@/lib/supabase/config";
 
 function getSupabaseConfig() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const envError = getSupabaseEnvErrorMessage();
 
-  if (!url || !anonKey) {
-    throw new Error("Missing Supabase environment variables.");
+  if (envError || !url || !anonKey) {
+    throw new Error(envError ?? "Missing Supabase environment variables.");
   }
 
   return { url, anonKey };

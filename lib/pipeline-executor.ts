@@ -121,12 +121,14 @@ async function executeCaptionApiFlow(
   image: MatrixImageRecord,
   endpoint: string,
   fetchImpl: typeof fetch,
-  apiKey?: string
+  apiKey?: string,
+  onStatus?: (status: "queued" | "uploading" | "registering" | "captioning" | "complete" | "failed") => void
 ): Promise<PipelineExecutionResult> {
   const stepTitle = "Caption API";
   const startedAt = Date.now();
 
   if (!apiKey) {
+    onStatus?.("complete");
     const outputText = buildMockStepOutput(flavor, image, stepTitle);
 
     return {
@@ -155,12 +157,14 @@ async function executeCaptionApiFlow(
   }
 
   if (!image.publicUrl) {
+    onStatus?.("failed");
     throw new Error(`Image ${image.title} is missing a public URL.`);
   }
 
   const baseUrl = normalizeApiBaseUrl(endpoint);
   const contentType = inferContentType(image);
 
+  onStatus?.("uploading");
   const presignResponse = await fetchImpl(`${baseUrl}/pipeline/generate-presigned-url`, {
     method: "POST",
     headers: {
@@ -171,6 +175,7 @@ async function executeCaptionApiFlow(
   });
 
   if (!presignResponse.ok) {
+    onStatus?.("failed");
     const errorBody = await presignResponse.text();
     throw new Error(
       `Failed to generate upload URL (${presignResponse.status}). ${errorBody || "No response body."}`
@@ -188,6 +193,7 @@ async function executeCaptionApiFlow(
 
   const sourceImageResponse = await fetchImpl(image.publicUrl);
   if (!sourceImageResponse.ok) {
+    onStatus?.("failed");
     const errorBody = await sourceImageResponse.text();
     throw new Error(
       `Failed to fetch source image (${sourceImageResponse.status}). ${errorBody || "No response body."}`
@@ -204,12 +210,14 @@ async function executeCaptionApiFlow(
   });
 
   if (!uploadResponse.ok) {
+    onStatus?.("failed");
     const errorBody = await uploadResponse.text();
     throw new Error(
       `Failed to upload image bytes (${uploadResponse.status}). ${errorBody || "No response body."}`
     );
   }
 
+  onStatus?.("registering");
   const registerResponse = await fetchImpl(`${baseUrl}/pipeline/upload-image-from-url`, {
     method: "POST",
     headers: {
@@ -223,6 +231,7 @@ async function executeCaptionApiFlow(
   });
 
   if (!registerResponse.ok) {
+    onStatus?.("failed");
     const errorBody = await registerResponse.text();
     throw new Error(
       `Failed to register uploaded image (${registerResponse.status}). ${errorBody || "No response body."}`
@@ -234,9 +243,11 @@ async function executeCaptionApiFlow(
   };
 
   if (!registerPayload.imageId) {
+    onStatus?.("failed");
     throw new Error("Image registration response did not include imageId.");
   }
 
+  onStatus?.("captioning");
   const generateResponse = await fetchImpl(`${baseUrl}/pipeline/generate-captions`, {
     method: "POST",
     headers: {
@@ -250,6 +261,7 @@ async function executeCaptionApiFlow(
   });
 
   if (!generateResponse.ok) {
+    onStatus?.("failed");
     const errorBody = await generateResponse.text();
     throw new Error(
       `Failed to generate captions (${generateResponse.status}). ${errorBody || "No response body."}`
@@ -259,6 +271,7 @@ async function executeCaptionApiFlow(
   const captionsPayload = await parseJsonResponse(generateResponse);
   const outputText = extractCaptionText(captionsPayload);
   const processingTimeSeconds = (Date.now() - startedAt) / 1000;
+  onStatus?.("complete");
 
   return {
     imageId: image.id,
@@ -298,12 +311,16 @@ export async function executePipelineForImage(
   options?: {
     endpoint?: string;
     fetchImpl?: typeof fetch;
+    onStatus?: (image: MatrixImageRecord, status: "queued" | "uploading" | "registering" | "captioning" | "complete" | "failed") => void;
   }
 ): Promise<PipelineExecutionResult> {
   const endpoint = options?.endpoint ?? "https://api.almostcrackd.ai/";
   const apiKey = process.env.ALMOSTCRACKD_API_KEY;
   const fetchImpl = options?.fetchImpl ?? fetch;
-  return executeCaptionApiFlow(flavor, image, endpoint, fetchImpl, apiKey);
+  options?.onStatus?.(image, "queued");
+  return executeCaptionApiFlow(flavor, image, endpoint, fetchImpl, apiKey, (status) =>
+    options?.onStatus?.(image, status)
+  );
 }
 
 export async function executeImageSetStudy(
@@ -314,6 +331,7 @@ export async function executeImageSetStudy(
     fetchImpl?: typeof fetch;
     concurrency?: number;
     onProgress?: (completed: number, total: number, result: PipelineExecutionResult) => void;
+    onStatus?: (image: MatrixImageRecord, status: "queued" | "uploading" | "registering" | "captioning" | "complete" | "failed") => void;
   }
 ) {
   const concurrency = Math.max(1, options?.concurrency ?? 4);
