@@ -3,11 +3,10 @@ import { cache } from "react";
 import type { ProfileRecord } from "@/lib/supabase/types";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
-export function isAllowedAdminProfile(profile: Pick<
-  ProfileRecord,
-  "is_superadmin"
-> | null) {
-  return profile?.is_superadmin === true;
+export function isAllowedAdminProfile(
+  profile: Pick<ProfileRecord, "is_superadmin" | "is_matrix_admin"> | null
+) {
+  return profile?.is_superadmin === true || profile?.is_matrix_admin === true;
 }
 
 export const getCurrentAdminProfile = cache(async () => {
@@ -55,7 +54,7 @@ export async function requireAdminProfile() {
   }
 
   if (!adminContext.allowed) {
-    throw new Error("Super admin access required.");
+    throw new Error("Admin access requires is_superadmin or is_matrix_admin.");
   }
 
   return adminContext;

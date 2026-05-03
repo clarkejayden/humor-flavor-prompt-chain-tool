@@ -1,15 +1,21 @@
 import Link from "next/link";
 
+import { ThemeToggle } from "@/components/theme-toggle";
+
 export function RequestAccess() {
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-12">
+    <main className="relative flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="absolute right-5 top-5">
+        <ThemeToggle />
+      </div>
       <div className="glass-panel max-w-2xl rounded-[2rem] border border-slate-800 bg-slate-950/60 p-10 text-center">
         <p className="text-xs uppercase tracking-[0.4em] text-cyan-400">Access Denied</p>
         <h1 className="mt-4 text-4xl font-semibold text-slate-100">
-          The Matrix is restricted to super admins.
+          This prompt chain tool is restricted.
         </h1>
         <p className="mt-4 text-base text-slate-400">
-          Access requires <code>profiles.is_superadmin</code> to be <code>true</code>.
+          Access requires <code>profiles.is_superadmin</code> or <code>profiles.is_matrix_admin</code> to be{" "}
+          <code>true</code>.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <a

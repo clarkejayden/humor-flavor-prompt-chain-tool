@@ -20,6 +20,8 @@ export interface ChainStepResult {
 
 export interface ChainRunnerOptions {
   endpoint?: string;
+  /** Server-side JWT for api.almostcrackd.ai (Authorization: Bearer) */
+  apiKey?: string;
   signal?: AbortSignal;
   fetchImpl?: typeof fetch;
 }
@@ -71,6 +73,7 @@ export async function runFlavorChain(
 ) {
   const fetchImpl = options.fetchImpl ?? fetch;
   const endpoint = options.endpoint ?? "https://api.almostcrackd.ai/";
+  const apiKey = options.apiKey;
   const outputs: string[] = [];
   const results: ChainStepResult[] = [];
 
@@ -80,7 +83,8 @@ export async function runFlavorChain(
       method: "POST",
       signal: options.signal,
       headers: {
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
       },
       body: JSON.stringify({
         image_url: input.imageUrl,

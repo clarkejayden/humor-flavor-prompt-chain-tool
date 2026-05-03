@@ -32,7 +32,13 @@ export default async function FlavorEditorPage() {
   try {
     const bootstrap = await fetchMatrixBootstrap();
 
-    return <SimpleFlavorManager initialFlavors={bootstrap.flavors} />;
+    return (
+      <SimpleFlavorManager
+        initialFlavors={bootstrap.flavors}
+        initialImages={bootstrap.images}
+        initialCaptions={bootstrap.captions}
+      />
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown Matrix bootstrap failure.";
     return (

@@ -21,7 +21,10 @@ export async function POST(request: Request) {
     }
 
     if (!adminContext.allowed) {
-      return NextResponse.json({ error: "Super admin access required." }, { status: 403 });
+      return NextResponse.json(
+        { error: "Admin access required (is_superadmin or is_matrix_admin)." },
+        { status: 403 }
+      );
     }
 
     const body = (await request.json()) as {

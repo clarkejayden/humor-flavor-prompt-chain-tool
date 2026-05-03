@@ -31,13 +31,21 @@ import {
   Trash2
 } from "lucide-react";
 
+import { FlavorApiTester } from "@/components/flavor-api-tester";
 import { AnimatedButton } from "@/components/ui/animated-button";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import type { MatrixFlavorRecord, MatrixStepRecord } from "@/lib/matrix/types";
+import type {
+  MatrixCaptionRecord,
+  MatrixFlavorRecord,
+  MatrixImageRecord,
+  MatrixStepRecord
+} from "@/lib/matrix/types";
 import { cn } from "@/lib/utils";
 
 interface SimpleFlavorManagerProps {
   initialFlavors: MatrixFlavorRecord[];
+  initialImages: MatrixImageRecord[];
+  initialCaptions: MatrixCaptionRecord[];
 }
 
 type FlavorFormState = {
@@ -595,7 +603,11 @@ function SortableStepCard({
   );
 }
 
-export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps) {
+export function SimpleFlavorManager({
+  initialFlavors,
+  initialImages,
+  initialCaptions
+}: SimpleFlavorManagerProps) {
   const supabase = useMemo(() => createSupabaseBrowserClient(), []);
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
   const [flavors, setFlavors] = useState(initialFlavors);
@@ -1251,7 +1263,7 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
     <main className="min-h-screen bg-[#020617] px-6 py-10 text-slate-100">
       <div className="mx-auto grid max-w-7xl gap-6 lg:grid-cols-[300px,1fr]">
         <aside className="glass-panel rounded-[1.75rem] border border-slate-800 bg-slate-950/55 p-5">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             <div>
               <p className="text-xs uppercase tracking-[0.3em] text-cyan-400">Humor Flavors</p>
               <h1 className="mt-2 text-2xl font-semibold">Flavors and steps</h1>
@@ -1503,7 +1515,9 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                   {selectedFlavor ? `${selectedFlavor.name} pipeline` : "Select a flavor"}
                 </h2>
                 <p className="mt-2 text-sm text-slate-400">
-                  Outputs from earlier steps can be referenced with <span className="font-mono text-cyan-300">{"{{step_1_output}}"}</span>.
+                  Reference earlier step outputs with{" "}
+                  <span className="font-mono text-cyan-300">{"{{step_1}}"}</span>,{" "}
+                  <span className="font-mono text-cyan-300">{"{{step_2}}"}</span>, etc.
                 </p>
               </div>
 
@@ -1665,14 +1679,15 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
                         setStepForm((current) => ({ ...current, userPrompt: event.target.value }))
                       }
                       className="rounded-[1rem] border border-slate-800 bg-slate-950/70 px-4 py-3 font-mono text-sm text-slate-100 outline-none"
-                      placeholder="Use {{step_1_output}} to reference earlier outputs."
+                      placeholder="Use {{step_1}} to inject the output from step 1."
                       data-tour="step-user-prompt"
                     />
                   </label>
 
                   <div className="flex items-center justify-between">
                     <p className="text-xs text-slate-500">
-                      Placeholder syntax: <span className="font-mono text-cyan-300">{"{{step_1_output}}"}</span>
+                      Placeholder syntax: <span className="font-mono text-cyan-300">{"{{step_1}}"}</span>,{" "}
+                      <span className="font-mono text-cyan-300">{"{{step_2}}"}</span>
                     </p>
                     <AnimatedButton onClick={saveStep} disabled={pending || stepForm.title.trim().length === 0}>
                       <Save className="mr-2 h-4 w-4" />
@@ -1755,6 +1770,16 @@ export function SimpleFlavorManager({ initialFlavors }: SimpleFlavorManagerProps
           </section>
         </div>
       </div>
+
+      <div className="mx-auto mt-8 max-w-7xl space-y-4">
+        <p className="text-xs uppercase tracking-[0.28em] text-slate-500">Assignment 8 · API & captions</p>
+        <FlavorApiTester
+          selectedFlavor={selectedFlavor}
+          images={initialImages}
+          initialCaptions={initialCaptions}
+        />
+      </div>
+
       <button
         type="button"
         onClick={openTutorial}

@@ -20,7 +20,10 @@ export async function POST(request: Request) {
     }
 
     if (!adminContext.allowed) {
-      return NextResponse.json({ error: "Super admin access required." }, { status: 403 });
+      return NextResponse.json(
+        { error: "Admin access required (is_superadmin or is_matrix_admin)." },
+        { status: 403 }
+      );
     }
 
     const body = (await request.json()) as {
@@ -33,11 +36,17 @@ export async function POST(request: Request) {
       }>;
     };
 
-    const results = await runFlavorChain({
-      imageUrl: body.imageUrl,
-      systemPrompt: body.systemPrompt,
-      steps: body.steps
-    });
+    const results = await runFlavorChain(
+      {
+        imageUrl: body.imageUrl,
+        systemPrompt: body.systemPrompt,
+        steps: body.steps
+      },
+      {
+        endpoint: process.env.ALMOSTCRACKD_API_URL ?? "https://api.almostcrackd.ai/",
+        apiKey: process.env.ALMOSTCRACKD_API_KEY
+      }
+    );
 
     return NextResponse.json({ results });
   } catch (error) {

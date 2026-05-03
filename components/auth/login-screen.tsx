@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ShieldCheck } from "lucide-react";
 
+import { ThemeToggle } from "@/components/theme-toggle";
 import { AnimatedButton } from "@/components/ui/animated-button";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
@@ -38,9 +39,12 @@ export function LoginScreen() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center px-6 py-12">
+    <main className="relative flex min-h-screen items-center justify-center px-6 py-12">
+      <div className="absolute right-5 top-5">
+        <ThemeToggle />
+      </div>
       <div className="glass-panel max-w-2xl rounded-[2rem] border border-slate-800 bg-slate-950/65 p-10 text-center">
-        <p className="text-xs uppercase tracking-[0.38em] text-cyan-400">Super Admin Access</p>
+        <p className="text-xs uppercase tracking-[0.38em] text-cyan-400">Admin sign-in</p>
         <div className="mt-5 inline-flex rounded-full border border-cyan-400/25 bg-cyan-400/10 p-4 text-cyan-200">
           <ShieldCheck className="h-7 w-7" />
         </div>
@@ -48,7 +52,7 @@ export function LoginScreen() {
           Sign in to manage humor flavors.
         </h1>
         <p className="mt-4 text-base text-slate-400">
-          Access is limited to authenticated super admins. Continue with OAuth to verify your account.
+          Matrix admins and super admins only. Continue with OAuth to verify your account.
         </p>
         <div className="mt-8">
           <AnimatedButton onClick={signIn} disabled={pending} className="px-6 py-3">

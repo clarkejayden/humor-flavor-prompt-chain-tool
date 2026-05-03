@@ -41,13 +41,14 @@ export default async function HomePage() {
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
       <div className="glass-panel max-w-2xl rounded-[2rem] p-10 text-center">
         <p className="text-sm uppercase tracking-[0.32em] text-sky-400">
-          Humor Flavors
+          Week 8 · Prompt chain tool
         </p>
         <h1 className="mt-4 text-4xl font-semibold text-slate-50 dark:text-slate-50">
-          Admin management workspace for prompt-chain flavors.
+          Humor flavors, steps, and caption tests.
         </h1>
         <p className="mt-4 text-base text-slate-600 dark:text-slate-300">
-          Use the guarded editor to manage sequential chain steps, images, and API test runs.
+          Create and reorder flavor steps, run the almostcrackd caption pipeline on your image set, and read stored
+          captions—only for matrix or super admins.
         </p>
         <div className="mt-8 flex flex-wrap justify-center gap-3">
           <Link
